@@ -1,0 +1,434 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  // NestJS app is CommonJS — emit a CJS client so the generated tree loads
+  // without ESM/CJS interop errors when compiled through nest build.
+  moduleFormat = "cjs"
+  runtime      = "nodejs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// USER MODEL
+model User {
+  id                     String  @id @default(uuid())
+  firstName              String
+  lastName               String
+  username               String  @unique // Auto-generated via slugify
+  email                  String  @unique // MoEST address (e.g. @oyomoest.ng)
+  phoneNumber            String  @unique
+  password               String
+  requiresPasswordChange Boolean @default(false)
+
+  // RBAC — single role per user (NEURON-RBAC-001 v1.1, Section 7).
+  // "Role is singular; a user holds exactly one role. No multi-role assignment."
+  role Role @default(LIE)
+
+  // Geographic / directorate scoping — enforced at the SERVICE layer (RBAC Rule 3),
+  // never by the guard. The guard confirms the role; the service compares these
+  // claims against the record being accessed.
+  assignedLga     String? // LIE: assigned LGA
+  assignedZone    String? // ZONAL_COORD: assigned zone
+  assignedCluster String? // INSPECT_OFFICER: assigned school cluster
+
+  // SERVICE_ACCOUNT holders are flagged system accounts, not human users (RBAC Section 7).
+  isServiceAccount Boolean @default(false)
+
+  isDeleted           Boolean       @default(false)
+  accountStatus       AccountStatus @default(PENDING)
+  accountStatusReason String?
+
+  // Audit Tracking (who provisioned / approved / rejected them)
+  actionById    String?
+  actionBy      User?   @relation("AdminActions", fields: [actionById], references: [id])
+  usersActioned User[]  @relation("AdminActions")
+
+  // Module 1 field capture — visits this inspector (LIE) is responsible for.
+  visits           SchoolVisit[]           @relation("InspectorVisits")
+  securityProfiles SchoolSecurityProfile[] @relation("SecurityCollected")
+
+  // Auth / Password Reset
+  refreshToken   String?
+  resetOTP       String?
+  resetOTPExpiry DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([actionById])
+  @@index([accountStatus])
+  @@index([role])
+}
+
+// RBAC roles — NEURON-RBAC-001 v1.1, Section 7. A user holds exactly one role.
+enum Role {
+  LIE // Field inspector. LGA-scoped.
+  ZONAL_COORD // Zone supervisor. Zone-scoped.
+  EMIS_OFFICER // State-wide. Modules 1-4. Role class, not named-person.
+  EXEC_VIEW // Dashboard read-only. Commissioner, PS, Governor, WC Chair. No media. No Module 4.
+  SYS_ADMIN // Full access. ZDT only.
+  INSPECT_OFFICER // [v1.1] Directorate field officer. Cluster-scoped. Workflow submit.
+  HOD_APPROVE // [v1.1] Director/Deputy Director. Directorate read + dashboard. No Module 4.
+  SERVICE_ACCOUNT // [v1.1] System-to-system. No human JWT. Scoped to automated routes.
+}
+
+enum AccountStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  BANNED
+  REJECTED
+  DEACTIVATED
+}
+
+// ─── Module 1: Field Capture ──────────────────────────────────────────────────
+// Reference data (Dim_*) is pre-loaded; the LIE selects from it and captures
+// against it. These models back the LIE dashboard worklist + stats.
+
+// Dim_Session — academic session. Exactly one row should have isCurrent = true.
+model Session {
+  id        String    @id @default(uuid())
+  name      String    @unique // e.g. "2025/2026"
+  startDate DateTime?
+  endDate   DateTime?
+  isCurrent Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  visits           SchoolVisit[]
+  securityProfiles SchoolSecurityProfile[]
+
+  @@index([isCurrent])
+}
+
+enum SchoolType {
+  PRIMARY
+  JSS
+  SSS
+  COMBINED_PRY_JSS
+  COMBINED_JSS_SSS
+  COMBINED_PRY_SSS
+}
+
+enum SchoolOwnership {
+  PUBLIC
+  MISSION
+  PRIVATE
+}
+
+enum SchoolCategory {
+  DAY
+  BOARDING
+  SEMI_BOARDING
+}
+
+enum GenderCategory {
+  MIXED
+  BOYS_ONLY
+  GIRLS_ONLY
+}
+
+// Dim_School — school master record. Pre-loaded from the registry; the LIE
+// confirms/updates details and captures GPS during the visit. `lgaName` is the
+// scoping key matched against User.assignedLga (RBAC Rule 3, service-layer).
+model School {
+  id             String          @id @default(uuid())
+  code           String          @unique
+  name           String
+  type           SchoolType
+  ownership      SchoolOwnership
+  category       SchoolCategory
+  genderCategory GenderCategory
+  lgaName        String
+  lgaCode        String?
+  zoneName       String?
+  // Inspectorate cluster — the scoping key matched against
+  // User.assignedCluster for INSPECT_OFFICER (RBAC Rule 3, service-layer).
+  cluster        String?
+  ward           String?
+  community      String?
+  address        String?
+  latitude       Float?
+  longitude      Float?
+  isActive       Boolean         @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  visits           SchoolVisit[]
+  securityProfiles SchoolSecurityProfile[]
+
+  @@index([lgaName])
+  @@index([cluster])
+  @@index([isActive])
+}
+
+// Capture lifecycle for a single section (matches the guide's
+// Draft → Submitted → Verified, with NOT_STARTED for the worklist).
+enum CaptureStatus {
+  NOT_STARTED
+  DRAFT
+  SUBMITTED
+  VERIFIED
+}
+
+// One row per school per session — the anchor the LIE dashboard reads for
+// progress, and the parent the five capture sections will hang off later.
+model SchoolVisit {
+  id        String  @id @default(uuid())
+  schoolId  String
+  school    School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  // The LIE responsible for this visit (nullable until assigned/started).
+  inspectorId String?
+  inspector   User?   @relation("InspectorVisits", fields: [inspectorId], references: [id])
+
+  // Per-section progress (ASC, students, staff, security, media).
+  ascStatus      CaptureStatus @default(NOT_STARTED)
+  studentsStatus CaptureStatus @default(NOT_STARTED)
+  staffStatus    CaptureStatus @default(NOT_STARTED)
+  securityStatus CaptureStatus @default(NOT_STARTED)
+  mediaStatus    CaptureStatus @default(NOT_STARTED)
+  // Rolled-up status across the five sections, maintained by the service layer.
+  overallStatus  CaptureStatus @default(NOT_STARTED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, sessionId])
+  @@index([inspectorId])
+  @@index([overallStatus])
+}
+
+// Fact_SchoolSecurity — School Security & Vulnerability Profile (Field Capture
+// Guide §5). One record per school per session. Categorical fields are stored as
+// strings (validated against fixed option sets in the DTO) to avoid a sprawl of
+// Postgres enums. All capture fields are nullable so a partial draft can be
+// saved; the submit endpoint enforces required fields and fills the computed
+// scores. The five score fields + tier are never entered by the LIE.
+model SchoolSecurityProfile {
+  id            String  @id @default(uuid())
+  schoolId      String
+  school        School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  sessionId     String
+  session       Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  collectedById String?
+  collectedBy   User?   @relation("SecurityCollected", fields: [collectedById], references: [id])
+
+  // Module A — Location & Access
+  distanceToMajorRoadKm    Float?
+  roadSurfaceType          String? // Tarmac | Laterite | Gravel | Footpath Only | None
+  estimatedTravelTimeMins  Int?
+  nearestTown              String?
+  forestProximity          String? // Adjacent | Near | Moderate | Distant
+  forestDistanceEstimateKm Float?
+
+  // Module B — Physical Infrastructure & Perimeter
+  perimeterFenceStatus String? // None | Partial | Full
+  fenceType            String? // Concrete Block | Wire Mesh | Wooden | Mixed | None
+  numberOfEntryPoints  Int?
+  hasFunctionalGate    Boolean?
+  hasCctv              Boolean?
+  hasElectricity       Boolean?
+  hasSolar             Boolean?
+  hasExternalLighting  Boolean?
+
+  // Module C — Communication & Emergency Capacity
+  hasPhoneNetwork          Boolean?
+  networkProvider          String? // MTN | Airtel | Glo | 9mobile | None | Multiple
+  signalStrength           String? // Strong | Weak | None
+  hasLandline              Boolean?
+  hasRadioSet              Boolean?
+  hasEmergencyProtocol     Boolean?
+  distanceToSecurityPostKm Float?
+  nearestSecurityPostName  String?
+
+  // Module D — Incident History
+  hadSecurityIncident    Boolean?
+  incidentCount          Int?
+  mostRecentIncidentYear Int?
+  mostRecentIncidentType String? // Threat | Robbery | Abduction | Physical Attack | Vandalism | Other
+  incidentReportedToAuth Boolean?
+
+  // Computed risk scores (set on submit, 0–100; higher = more vulnerable)
+  isolationScore      Float?
+  infrastructureScore Float?
+  communicationScore  Float?
+  compositeRiskScore  Float?
+  riskTier            String? // High | Moderate | Low
+
+  recordStatus CaptureStatus @default(DRAFT)
+  submittedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, sessionId])
+  @@index([sessionId])
+  @@index([riskTier])
+}
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+// Append-only audit trail of consequential admin / oversight actions. Actor
+// identity is snapshotted (name/role) so the entry survives user changes. Scalar
+// only; no relations.
+model AuditLog {
+  id          String   @id @default(uuid())
+  actorId     String?
+  actorName   String?
+  actorRole   String?
+  action      String // e.g. USER_APPROVED, SECTION_VERIFIED
+  targetType  String? // USER | SCHOOL | SESSION | SECTION
+  targetId    String?
+  targetLabel String? // human-readable (email, school name…)
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([action])
+  @@index([actorId])
+}
+
+// ─── Register-type capture (multi-row) ────────────────────────────────────────
+// These three are registers: many rows per school per session, unlike the single
+// security profile. To keep this addition self-contained they use SCALAR foreign
+// keys (no Prisma relations); referential integrity + cascade is enforced by DB
+// constraints. Categorical fields are validated strings (see DTO option sets).
+
+// Fact_ASC — Annual School Census (Field Capture Guide §2). One row per class
+// level per gender per school per session.
+model AscRecord {
+  id            String  @id @default(uuid())
+  schoolId      String
+  sessionId     String
+  collectedById String?
+
+  classLevel     String // Pry1 … SSS3
+  gender         Gender
+  enrolmentCount Int    @default(0)
+  newEntrants    Int    @default(0)
+  repeaters      Int    @default(0)
+  dropoutCount   Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, sessionId, classLevel, gender])
+  @@index([schoolId, sessionId])
+}
+
+// Fact_Students — Student Management Register (Field Capture Guide §3). One row
+// per student per session.
+model StudentRecord {
+  id            String  @id @default(uuid())
+  schoolId      String
+  sessionId     String
+  collectedById String?
+
+  studentCode String
+  classLevel  String
+  firstName   String
+  middleName  String?
+  lastName    String
+  dateOfBirth DateTime?
+  gender      Gender
+
+  stateOfOrigin String?
+  lgaOfOrigin   String?
+
+  disabilityStatus Boolean @default(false)
+  disabilityType   String?
+
+  enrolmentType      String // New | Continuing | Returning | Transfer-In
+  distanceToSchoolKm Float?
+  transportMode      String? // Walking | Bicycle | Motorcycle | Vehicle | Public Transport
+  guardianName       String?
+  guardianPhone      String?
+  enrolmentDate      DateTime?
+  exitDate           DateTime?
+  exitReason         String? // Dropout | Transfer-Out | Completed | Deceased | Unknown
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, sessionId, studentCode])
+  @@index([schoolId, sessionId])
+}
+
+// Fact_Staff — Staff Management Register (Field Capture Guide §4). One row per
+// staff member per school per session.
+model StaffRecord {
+  id            String  @id @default(uuid())
+  schoolId      String
+  sessionId     String
+  collectedById String?
+
+  staffCode   String
+  firstName   String
+  middleName  String?
+  lastName    String
+  gender      Gender
+  dateOfBirth DateTime?
+  phoneNumber String?
+
+  staffType      String // Teaching | Non-Teaching
+  employmentType String // Permanent | Contract | NYSC | Volunteer
+  qualification  String // NCE | OND | HND | BSc | BEd | PGDE | MSc | MEd | PhD | Other
+  subject        String?
+
+  dateOfFirstAppointment DateTime?
+  datePostedToSchool     DateTime?
+  isResidentInCommunity  Boolean   @default(false)
+  yearsAtCurrentSchool   Int?
+  isHeadTeacher          Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, sessionId, staffCode])
+  @@index([schoolId, sessionId])
+}
+
+// Fact_SchoolMedia — School Media Capture (Field Capture Guide §6). One row per
+// uploaded file. IMAGES ONLY for now (no video). Binary lives in Cloudinary; we
+// store its public_id (for deletion) + secure_url + technical metadata. Scalar
+// FKs like the other registers.
+model SchoolMedia {
+  id           String  @id @default(uuid())
+  schoolId     String
+  sessionId    String
+  uploadedById String?
+
+  category  String // Module A | Module B | Module C | Module D | General
+  caption   String
+  mediaType String @default("image")
+
+  publicId         String // Cloudinary public_id
+  fileUrl          String // Cloudinary secure_url
+  originalFileName String?
+  format           String?
+  bytes            Int?
+  width            Int?
+  height           Int?
+  gpsLatitude      Float?
+  gpsLongitude     Float?
+
+  isPrimary Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId, sessionId])
+}
