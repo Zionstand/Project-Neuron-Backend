@@ -60,7 +60,9 @@ export class AuthService {
     res.cookie('access_token', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      // Cross-site in production (frontend on Vercel, API on Render) requires
+      // SameSite=None+Secure or the browser drops the cookie on XHR. Lax locally.
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       maxAge: 15 * 60 * 1000, // 15 minutes — matches JwtModule signOptions expiresIn
       path: '/',
     });
@@ -82,7 +84,7 @@ export class AuthService {
     res.cookie('refresh_token', `${userId}:${raw}`, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       // "Keep me signed in" => persistent 7-day cookie; otherwise a session cookie
       // that is cleared when the browser/PWA is closed.
       ...(rememberMe ? { maxAge: 7 * 24 * 60 * 60 * 1000 } : {}),
@@ -426,8 +428,18 @@ export class AuthService {
       where: { id: userId },
       data: { refreshToken: null },
     });
-    res.clearCookie('access_token', { path: '/' });
-    res.clearCookie('refresh_token', { path: '/' });
+    // Attributes must match those used when setting the cookie, or the browser
+    // won't match-and-clear the cross-site cookie.
+    const clearOpts = {
+      path: '/',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: (process.env.NODE_ENV === 'production' ? 'none' : 'lax') as
+        | 'none'
+        | 'lax',
+    };
+    res.clearCookie('access_token', clearOpts);
+    res.clearCookie('refresh_token', clearOpts);
     return { message: 'Logged out successfully' };
   }
 }
