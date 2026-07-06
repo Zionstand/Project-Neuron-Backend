@@ -37,9 +37,16 @@ export class MediaService {
       : null;
     return {
       session,
-      rows,
+      rows: rows.map((r) => this.withSignedUrl(r)),
       status: visit?.mediaStatus ?? CaptureStatus.NOT_STARTED,
     };
+  }
+
+  // Assets are private on Cloudinary; the delivery URL is signed on demand and
+  // returned in `fileUrl`. Access control (requireScopedSchool) has already run
+  // by the time we sign. `fileUrl` is never persisted as a public URL.
+  private withSignedUrl<T extends { publicId: string }>(row: T): T {
+    return { ...row, fileUrl: this.cloudinary.signedUrl(row.publicId) };
   }
 
   async upload(
@@ -80,7 +87,8 @@ export class MediaService {
         caption: dto.caption,
         mediaType: 'image',
         publicId: result.public_id,
-        fileUrl: result.secure_url,
+        // Never persist the delivery URL — private assets are signed on demand.
+        fileUrl: '',
         originalFileName: file.originalname ?? null,
         format: result.format ?? null,
         bytes: result.bytes ?? null,
@@ -91,7 +99,7 @@ export class MediaService {
     });
 
     await this.bump(schoolId, session.id, user.id);
-    return row;
+    return this.withSignedUrl(row);
   }
 
   async updateMeta(
@@ -112,7 +120,7 @@ export class MediaService {
       });
     }
 
-    return this.prisma.schoolMedia.update({
+    const row = await this.prisma.schoolMedia.update({
       where: { id: mediaId },
       data: {
         category: dto.category,
@@ -120,6 +128,7 @@ export class MediaService {
         isPrimary: dto.isPrimary === undefined ? existing.isPrimary : makePrimary,
       },
     });
+    return this.withSignedUrl(row);
   }
 
   async remove(user: RequestUser, schoolId: string, mediaId: string) {

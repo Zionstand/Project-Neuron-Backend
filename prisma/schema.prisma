@@ -415,8 +415,8 @@ model SchoolMedia {
   caption   String
   mediaType String @default("image")
 
-  publicId         String // Cloudinary public_id
-  fileUrl          String // Cloudinary secure_url
+  publicId         String // Cloudinary public_id (authenticated asset)
+  fileUrl          String // Deprecated: no longer persisted (always ""); URLs are signed on demand from publicId
   originalFileName String?
   format           String?
   bytes            Int?

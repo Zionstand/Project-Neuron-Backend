@@ -4,6 +4,12 @@ import {
   type UploadApiResponse,
 } from 'cloudinary';
 
+// School condition media is Ministry data and must never be publicly reachable.
+// Assets are uploaded as `authenticated` (no permanent public URL exists) and
+// delivered only via short-lived signed URLs generated at request time — the DB
+// stores the public_id, never a delivery URL.
+const SIGNED_URL_TTL_SECONDS = 15 * 60;
+
 @Injectable()
 export class CloudinaryService {
   private readonly logger = new Logger(CloudinaryService.name);
@@ -17,15 +23,17 @@ export class CloudinaryService {
     });
   }
 
-  // Upload an image buffer. Returns Cloudinary's metadata (secure_url, public_id,
-  // dimensions, format, bytes). `image_metadata` asks Cloudinary to parse EXIF so
-  // we can best-effort extract GPS.
+  // Upload an image buffer as a private (authenticated) asset. The returned
+  // secure_url requires a signature to load and is deliberately NOT persisted;
+  // we keep public_id only and sign on demand. `image_metadata` asks Cloudinary
+  // to parse EXIF so we can best-effort extract GPS later.
   uploadImage(buffer: Buffer, folder: string): Promise<UploadApiResponse> {
     return new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
         {
           folder,
           resource_type: 'image',
+          type: 'authenticated',
           image_metadata: true,
         },
         (error, result) => {
@@ -42,9 +50,32 @@ export class CloudinaryService {
     });
   }
 
+  // Generate a signed delivery URL for a private asset. When token auth is
+  // enabled on the account (CLOUDINARY_AUTH_KEY set) the URL expires after
+  // SIGNED_URL_TTL_SECONDS, per the briefing; otherwise it falls back to a
+  // tamper-proof (non-expiring) signed URL. Callers MUST enforce access
+  // control before calling this — signing does not check ownership.
+  signedUrl(publicId: string): string {
+    const authKey = process.env.CLOUDINARY_AUTH_KEY;
+    const opts: Record<string, unknown> = {
+      resource_type: 'image',
+      type: 'authenticated',
+      secure: true,
+    };
+    if (authKey) {
+      opts.auth_token = { key: authKey, duration: SIGNED_URL_TTL_SECONDS };
+    } else {
+      opts.sign_url = true;
+    }
+    return cloudinary.url(publicId, opts as never);
+  }
+
   async deleteImage(publicId: string): Promise<void> {
     try {
-      await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+      await cloudinary.uploader.destroy(publicId, {
+        resource_type: 'image',
+        type: 'authenticated',
+      });
     } catch (e) {
       // Don't block the DB delete if the asset is already gone.
       this.logger.warn(
