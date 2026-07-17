@@ -14,18 +14,21 @@ export const ALL_ROLES = [
   'INSPECT_OFFICER',
   'HOD_APPROVE',
   'SERVICE_ACCOUNT',
+  'PRINCIPAL',
 ] as const;
 
 export const ADMIN_ROLES = ['SYS_ADMIN'];
 
 // ─── Module 1 — Vulnerability Assessment ────────────────────────────────────
 // POST /inspections — LIE/INSPECT are LGA/cluster-scoped at the service layer.
+// PRINCIPAL is single-school-scoped and writes a separate PRINCIPAL-source record.
 export const CAN_SUBMIT_INSPECTION = [
   'LIE',
   'ZONAL_COORD',
   'INSPECT_OFFICER',
   'SERVICE_ACCOUNT',
   'SYS_ADMIN',
+  'PRINCIPAL',
 ];
 
 // GET /inspections — ZONAL is zone-scoped; EMIS/HOD are directorate/state-wide.
@@ -44,18 +47,20 @@ export const CAN_VIEW_INSPECTION = [
   'INSPECT_OFFICER',
   'HOD_APPROVE',
   'SYS_ADMIN',
+  'PRINCIPAL',
 ];
 
 // POST /inspections/media and GET /inspections/:id/media — owner-scoped (Rule 4).
-export const CAN_ACCESS_MEDIA = ['LIE', 'SYS_ADMIN'];
+export const CAN_ACCESS_MEDIA = ['LIE', 'SYS_ADMIN', 'PRINCIPAL'];
 
-// GET /schools — offline registry seed.
+// GET /schools — offline registry seed. PRINCIPAL is scoped to their one school.
 export const CAN_READ_SCHOOL_REGISTRY = [
   'LIE',
   'ZONAL_COORD',
   'INSPECT_OFFICER',
   'EMIS_OFFICER',
   'SYS_ADMIN',
+  'PRINCIPAL',
 ];
 
 // ─── Dashboards (aggregated intelligence only — no PII, no media, Rule 5) ─────

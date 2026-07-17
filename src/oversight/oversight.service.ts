@@ -9,7 +9,7 @@ import {
   type RequestUser,
   type SectionField,
 } from '../schools/schools.service';
-import { CaptureStatus } from '../generated/prisma/client';
+import { CaptureStatus, CaptureSource } from '../generated/prisma/client';
 import { AuditService } from '../audit/audit.service';
 
 type SectionKey = 'asc' | 'students' | 'staff' | 'security' | 'media';
@@ -42,18 +42,26 @@ export class OversightService {
   // ─── Submissions queue ──────────────────────────────────────────────────────
   async listSubmissions(user: RequestUser) {
     const session = await this.sessions.findCurrent();
+    const period = await this.sessions.findCurrentPeriod();
     const scope = this.schools.scopeWhere(user);
     const empty = {
       session: session ? { id: session.id, name: session.name } : null,
       summary: { schoolsAwaiting: 0, sectionsAwaiting: 0 },
       items: [] as unknown[],
     };
-    if (!session || !scope) return empty;
+    if (!session || !period || !scope) return empty;
 
+    // Verification operates on the official inspector record for the current
+    // period only; principal self-service submissions are a separate source.
     const schools = await this.prisma.school.findMany({
       where: scope,
       orderBy: { name: 'asc' },
-      include: { visits: { where: { sessionId: session.id }, take: 1 } },
+      include: {
+        visits: {
+          where: { periodId: period.id, source: CaptureSource.INSPECTOR },
+          take: 1,
+        },
+      },
     });
 
     let sectionsAwaiting = 0;
@@ -99,9 +107,10 @@ export class OversightService {
   // ─── Risk overview ──────────────────────────────────────────────────────────
   async riskOverview(user: RequestUser) {
     const session = await this.sessions.findCurrent();
+    const period = await this.sessions.findCurrentPeriod();
     const scope = this.schools.scopeWhere(user);
     const tiers = { High: 0, Moderate: 0, Low: 0 };
-    if (!session || !scope) {
+    if (!session || !period || !scope) {
       return {
         session: session ? { id: session.id, name: session.name } : null,
         tiers,
@@ -111,7 +120,8 @@ export class OversightService {
 
     const profiles = await this.prisma.schoolSecurityProfile.findMany({
       where: {
-        sessionId: session.id,
+        periodId: period.id,
+        source: CaptureSource.INSPECTOR,
         recordStatus: { in: [CaptureStatus.SUBMITTED, CaptureStatus.VERIFIED] },
         school: scope,
       },
@@ -151,7 +161,11 @@ export class OversightService {
     await this.schools.setSectionStatus(visit.id, field, CaptureStatus.VERIFIED);
     if (section === 'security') {
       await this.prisma.schoolSecurityProfile.updateMany({
-        where: { schoolId, sessionId: visit.sessionId },
+        where: {
+          schoolId,
+          periodId: visit.periodId,
+          source: CaptureSource.INSPECTOR,
+        },
         data: { recordStatus: CaptureStatus.VERIFIED },
       });
     }
@@ -183,7 +197,11 @@ export class OversightService {
     await this.schools.setSectionStatus(visit.id, field, CaptureStatus.DRAFT);
     if (section === 'security') {
       await this.prisma.schoolSecurityProfile.updateMany({
-        where: { schoolId, sessionId: visit.sessionId },
+        where: {
+          schoolId,
+          periodId: visit.periodId,
+          source: CaptureSource.INSPECTOR,
+        },
         data: { recordStatus: CaptureStatus.DRAFT },
       });
     }
@@ -204,14 +222,28 @@ export class OversightService {
     section: SectionKey,
   ) {
     await this.schools.requireScopedSchool(user, schoolId);
-    const session = await this.sessions.getCurrentOrThrow();
+    const period = await this.sessions.getCurrentPeriodOrThrow();
     const field = FIELD[section];
     const visit = await this.prisma.schoolVisit.findUnique({
-      where: { schoolId_sessionId: { schoolId, sessionId: session.id } },
+      where: {
+        schoolId_periodId_source: {
+          schoolId,
+          periodId: period.id,
+          source: CaptureSource.INSPECTOR,
+        },
+      },
     });
     if (!visit) {
-      throw new BadRequestException('This school has no capture for the current session.');
+      throw new BadRequestException('This school has no capture for the current period.');
     }
-    return { visit: { id: visit.id, sessionId: visit.sessionId, status: visit[field] }, field };
+    return {
+      visit: {
+        id: visit.id,
+        sessionId: visit.sessionId,
+        periodId: visit.periodId,
+        status: visit[field],
+      },
+      field,
+    };
   }
 }

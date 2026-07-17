@@ -60,6 +60,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       assignedLga: user.assignedLga,
       assignedZone: user.assignedZone,
       assignedCluster: user.assignedCluster,
+      assignedSchoolId: user.assignedSchoolId,
     };
   }
 }

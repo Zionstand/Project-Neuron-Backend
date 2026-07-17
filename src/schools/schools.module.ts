@@ -7,6 +7,7 @@ import { MediaController } from './media.controller';
 import { MediaService } from './media.service';
 import { AdminSchoolsController } from './admin-schools.controller';
 import { AdminSchoolsService } from './admin-schools.service';
+import { PublicSchoolsController } from './public-schools.controller';
 import { SessionsModule } from '../sessions/sessions.module';
 
 @Module({
@@ -16,6 +17,7 @@ import { SessionsModule } from '../sessions/sessions.module';
     RegistersController,
     MediaController,
     AdminSchoolsController,
+    PublicSchoolsController,
   ],
   providers: [
     SchoolsService,

@@ -57,7 +57,22 @@ try {
   );
   const session = (await q(`SELECT id FROM "Session" WHERE name=$1`, [SESSION_NAME])).rows[0];
 
-  // 3. Schools + visits.
+  // 2b. Capture periods: Term 1 (current) + Term 2 (upcoming) for demoing rounds.
+  await q(
+    `INSERT INTO "CapturePeriod" (id, "sessionId", name, sequence, "isCurrent", "updatedAt")
+     VALUES (gen_random_uuid(), $1, 'Term 1', 1, true, now())
+     ON CONFLICT ("sessionId", name) DO UPDATE SET "isCurrent"=true, "updatedAt"=now()`,
+    [session.id],
+  );
+  await q(
+    `INSERT INTO "CapturePeriod" (id, "sessionId", name, sequence, "isCurrent", "updatedAt")
+     VALUES (gen_random_uuid(), $1, 'Term 2', 2, false, now())
+     ON CONFLICT ("sessionId", name) DO NOTHING`,
+    [session.id],
+  );
+  const period = (await q(`SELECT id FROM "CapturePeriod" WHERE "sessionId"=$1 AND name='Term 1'`, [session.id])).rows[0];
+
+  // 3. Schools + visits (seeded against the current period, Term 1).
   let visitsMade = 0;
   for (const s of SCHOOLS) {
     await q(
@@ -71,14 +86,14 @@ try {
     if (s.status === 'SKIP') continue;
     const sec = sectionsFor(s.status);
     await q(
-      `INSERT INTO "SchoolVisit" (id, "schoolId", "sessionId", "inspectorId", "ascStatus","studentsStatus","staffStatus","securityStatus","mediaStatus","overallStatus","updatedAt")
-       VALUES (gen_random_uuid(), $1,$2,$3, $4::"CaptureStatus",$5::"CaptureStatus",$6::"CaptureStatus",$7::"CaptureStatus",$8::"CaptureStatus",$9::"CaptureStatus", now())
-       ON CONFLICT ("schoolId","sessionId") DO UPDATE SET
+      `INSERT INTO "SchoolVisit" (id, "schoolId", "sessionId", "periodId", "inspectorId", "source", "ascStatus","studentsStatus","staffStatus","securityStatus","mediaStatus","overallStatus","updatedAt")
+       VALUES (gen_random_uuid(), $1,$2,$3,$4, 'INSPECTOR'::"CaptureSource", $5::"CaptureStatus",$6::"CaptureStatus",$7::"CaptureStatus",$8::"CaptureStatus",$9::"CaptureStatus",$10::"CaptureStatus", now())
+       ON CONFLICT ("schoolId","periodId","source") DO UPDATE SET
          "inspectorId"=EXCLUDED."inspectorId",
          "ascStatus"=EXCLUDED."ascStatus","studentsStatus"=EXCLUDED."studentsStatus",
          "staffStatus"=EXCLUDED."staffStatus","securityStatus"=EXCLUDED."securityStatus",
          "mediaStatus"=EXCLUDED."mediaStatus","overallStatus"=EXCLUDED."overallStatus","updatedAt"=now()`,
-      [school.id, session.id, lie.id, sec.asc, sec.students, sec.staff, sec.security, sec.media, s.status],
+      [school.id, session.id, period.id, lie.id, sec.asc, sec.students, sec.staff, sec.security, sec.media, s.status],
     );
     visitsMade++;
   }

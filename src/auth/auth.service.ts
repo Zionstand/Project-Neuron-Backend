@@ -29,6 +29,7 @@ type AccessTokenUser = {
   assignedLga: string | null;
   assignedZone: string | null;
   assignedCluster: string | null;
+  assignedSchoolId: string | null;
 };
 
 @Injectable()
@@ -53,6 +54,7 @@ export class AuthService {
       assignedLga: user.assignedLga,
       assignedZone: user.assignedZone,
       assignedCluster: user.assignedCluster,
+      assignedSchoolId: user.assignedSchoolId,
     };
 
     const accessToken = await this.jwtService.signAsync(payload);
@@ -92,13 +94,22 @@ export class AuthService {
     });
   }
 
-  // Self-service registration only ever creates a PENDING LIE awaiting SYS_ADMIN
-  // activation. Privileged roles (ZONAL_COORD, EMIS_OFFICER, HOD_APPROVE, etc.)
-  // are provisioned exclusively by a SYS_ADMIN via POST /users — never here.
-  // (RBAC Rule 6.) No token is issued; the account cannot log in until ACTIVE.
+  // Self-service registration creates a PENDING account awaiting SYS_ADMIN
+  // activation. Two paths only: the default LIE, and a PRINCIPAL who picks their
+  // school (the admin confirms the binding on approval). Every privileged role
+  // (ZONAL_COORD, EMIS_OFFICER, HOD_APPROVE, …) is provisioned exclusively by a
+  // SYS_ADMIN via POST /users — never here (RBAC Rule 6). No token is issued; the
+  // account cannot log in until ACTIVE.
   async register(dto: RegisterDto) {
     if (dto.password !== dto.confirmPassword) {
       throw new BadRequestException('Passwords do not match');
+    }
+
+    const isPrincipal = dto.role === 'PRINCIPAL';
+    if (isPrincipal && !dto.requestedSchoolId) {
+      throw new BadRequestException(
+        'Select the school you are the principal of.',
+      );
     }
 
     try {
@@ -112,6 +123,17 @@ export class AuthService {
         throw new ConflictException(
           'A user with this email or phone number already exists.',
         );
+      }
+
+      // A self-registering principal must reference a real, active school.
+      if (isPrincipal) {
+        const school = await this.prisma.school.findFirst({
+          where: { id: dto.requestedSchoolId, isActive: true },
+          select: { id: true },
+        });
+        if (!school) {
+          throw new BadRequestException('The selected school was not found.');
+        }
       }
 
       const salt = await bcrypt.genSalt(10);
@@ -132,8 +154,10 @@ export class AuthService {
           phoneNumber: dto.phoneNumber,
           password: hashedPassword,
           username,
-          role: 'LIE', // never self-assign a privileged role
-          assignedLga: dto.assignedLga ?? null,
+          // Only LIE or PRINCIPAL can be self-assigned; never a privileged role.
+          role: isPrincipal ? 'PRINCIPAL' : 'LIE',
+          assignedLga: isPrincipal ? null : (dto.assignedLga ?? null),
+          assignedSchoolId: isPrincipal ? dto.requestedSchoolId : null,
         },
         select: {
           id: true,
@@ -218,6 +242,7 @@ export class AuthService {
         assignedLga: user.assignedLga,
         assignedZone: user.assignedZone,
         assignedCluster: user.assignedCluster,
+        assignedSchoolId: user.assignedSchoolId,
       },
     };
   }
@@ -417,6 +442,7 @@ export class AuthService {
         assignedLga: true,
         assignedZone: true,
         assignedCluster: true,
+        assignedSchoolId: true,
       },
     });
     if (!user) throw new NotFoundException('User not found.');

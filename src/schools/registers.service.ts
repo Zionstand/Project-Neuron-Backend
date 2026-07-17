@@ -6,8 +6,16 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { SessionsService } from '../sessions/sessions.service';
-import { SchoolsService, type RequestUser } from './schools.service';
-import { CaptureStatus, Gender } from '../generated/prisma/client';
+import {
+  SchoolsService,
+  sourceForUser,
+  type RequestUser,
+} from './schools.service';
+import {
+  CaptureStatus,
+  CaptureSource,
+  Gender,
+} from '../generated/prisma/client';
 import {
   AscRecordDto,
   StudentRecordDto,
@@ -15,6 +23,9 @@ import {
 } from './dto/register.dto';
 
 const toDate = (v?: string | null) => (v ? new Date(v) : null);
+
+// The current capture period, carrying the session it belongs to.
+type Period = { id: string; sessionId: string };
 
 @Injectable()
 export class RegistersService {
@@ -24,33 +35,47 @@ export class RegistersService {
     private schools: SchoolsService,
   ) {}
 
-  // Common preamble: confirm scope, resolve the current session, ensure the
-  // visit row exists. Returns the session id.
-  private async prepare(user: RequestUser, schoolId: string) {
+  // Common preamble for writes: confirm scope, resolve the current capture period,
+  // ensure the visit row exists. Returns the period (which carries its sessionId).
+  private async prepare(user: RequestUser, schoolId: string): Promise<Period> {
     await this.schools.requireScopedSchool(user, schoolId);
-    const session = await this.sessions.getCurrentOrThrow();
-    await this.schools.ensureVisit(schoolId, session.id, user.id);
-    return session;
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    await this.schools.ensureVisit(
+      schoolId,
+      period.id,
+      period.sessionId,
+      user.id,
+      sourceForUser(user),
+    );
+    return period;
   }
 
-  private async sessionScope(user: RequestUser, schoolId: string) {
+  // For reads: the current period (nullable when none is configured).
+  private async periodScope(
+    user: RequestUser,
+    schoolId: string,
+  ): Promise<Period | null> {
     await this.schools.requireScopedSchool(user, schoolId);
-    return this.sessions.findCurrent();
+    return this.sessions.findCurrentPeriod();
   }
 
   // Recompute a register's section status from its row count (NOT_STARTED when
-  // empty, DRAFT otherwise) and roll it into the visit.
+  // empty, DRAFT otherwise) and roll it into the visit for this capture channel.
   private async refreshSection(
     schoolId: string,
+    periodId: string,
     sessionId: string,
     inspectorId: string,
+    source: CaptureSource,
     field: 'ascStatus' | 'studentsStatus' | 'staffStatus',
     count: number,
   ) {
     const visit = await this.schools.ensureVisit(
       schoolId,
+      periodId,
       sessionId,
       inspectorId,
+      source,
     );
     await this.schools.setSectionStatus(
       visit.id,
@@ -66,14 +91,19 @@ export class RegistersService {
   // ─── ASC ───────────────────────────────────────────────────────────────────
 
   async listAsc(user: RequestUser, schoolId: string) {
-    const session = await this.sessionScope(user, schoolId);
-    const rows = session
+    const period = await this.periodScope(user, schoolId);
+    const source = sourceForUser(user);
+    const rows = period
       ? await this.prisma.ascRecord.findMany({
-          where: { schoolId, sessionId: session.id },
+          where: { schoolId, periodId: period.id, source },
           orderBy: [{ classLevel: 'asc' }, { gender: 'asc' }],
         })
       : [];
-    return { session, rows, status: await this.sectionStatus(schoolId, session, 'ascStatus') };
+    return {
+      session: period ? { id: period.sessionId } : null,
+      rows,
+      status: await this.sectionStatus(schoolId, period, source, 'ascStatus'),
+    };
   }
 
   async createAsc(user: RequestUser, schoolId: string, dto: AscRecordDto) {
@@ -82,12 +112,15 @@ export class RegistersService {
         'New entrants cannot exceed the enrolment count.',
       );
     }
-    const session = await this.prepare(user, schoolId);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
     try {
       const row = await this.prisma.ascRecord.create({
         data: {
           schoolId,
-          sessionId: session.id,
+          sessionId: period.sessionId,
+          periodId: period.id,
+          source,
           collectedById: user.id,
           classLevel: dto.classLevel,
           gender: dto.gender as Gender,
@@ -97,7 +130,7 @@ export class RegistersService {
           dropoutCount: dto.dropoutCount,
         },
       });
-      await this.bumpAsc(schoolId, session.id, user.id);
+      await this.bumpAsc(schoolId, period, user.id, source);
       return row;
     } catch (e: any) {
       if (e?.code === 'P2002')
@@ -119,8 +152,9 @@ export class RegistersService {
         'New entrants cannot exceed the enrolment count.',
       );
     }
-    const session = await this.prepare(user, schoolId);
-    await this.ownedRow('ascRecord', rowId, schoolId, session.id);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
+    await this.ownedRow('ascRecord', rowId, schoolId, period.id, source);
     try {
       const row = await this.prisma.ascRecord.update({
         where: { id: rowId },
@@ -133,7 +167,7 @@ export class RegistersService {
           dropoutCount: dto.dropoutCount,
         },
       });
-      await this.bumpAsc(schoolId, session.id, user.id);
+      await this.bumpAsc(schoolId, period, user.id, source);
       return row;
     } catch (e: any) {
       if (e?.code === 'P2002')
@@ -145,24 +179,32 @@ export class RegistersService {
   }
 
   async removeAsc(user: RequestUser, schoolId: string, rowId: string) {
-    const session = await this.prepare(user, schoolId);
-    await this.ownedRow('ascRecord', rowId, schoolId, session.id);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
+    await this.ownedRow('ascRecord', rowId, schoolId, period.id, source);
     await this.prisma.ascRecord.delete({ where: { id: rowId } });
-    await this.bumpAsc(schoolId, session.id, user.id);
+    await this.bumpAsc(schoolId, period, user.id, source);
     return { message: 'Record removed.' };
   }
 
   async submitAsc(user: RequestUser, schoolId: string) {
-    const session = await this.prepare(user, schoolId);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
     const count = await this.prisma.ascRecord.count({
-      where: { schoolId, sessionId: session.id },
+      where: { schoolId, periodId: period.id, source },
     });
     if (count === 0) {
       throw new BadRequestException(
         'Add at least one class enrolment row before submitting.',
       );
     }
-    const visit = await this.schools.ensureVisit(schoolId, session.id, user.id);
+    const visit = await this.schools.ensureVisit(
+      schoolId,
+      period.id,
+      period.sessionId,
+      user.id,
+      source,
+    );
     await this.schools.setSectionStatus(
       visit.id,
       'ascStatus',
@@ -171,27 +213,46 @@ export class RegistersService {
     return { message: 'Annual School Census submitted.' };
   }
 
-  private async bumpAsc(schoolId: string, sessionId: string, userId: string) {
+  private async bumpAsc(
+    schoolId: string,
+    period: Period,
+    userId: string,
+    source: CaptureSource,
+  ) {
     const count = await this.prisma.ascRecord.count({
-      where: { schoolId, sessionId },
+      where: { schoolId, periodId: period.id, source },
     });
-    await this.refreshSection(schoolId, sessionId, userId, 'ascStatus', count);
+    await this.refreshSection(
+      schoolId,
+      period.id,
+      period.sessionId,
+      userId,
+      source,
+      'ascStatus',
+      count,
+    );
   }
 
   // ─── Students ────────────────────────────────────────────────────────────────
 
   async listStudents(user: RequestUser, schoolId: string) {
-    const session = await this.sessionScope(user, schoolId);
-    const rows = session
+    const period = await this.periodScope(user, schoolId);
+    const source = sourceForUser(user);
+    const rows = period
       ? await this.prisma.studentRecord.findMany({
-          where: { schoolId, sessionId: session.id },
+          where: { schoolId, periodId: period.id, source },
           orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
         })
       : [];
     return {
-      session,
+      session: period ? { id: period.sessionId } : null,
       rows,
-      status: await this.sectionStatus(schoolId, session, 'studentsStatus'),
+      status: await this.sectionStatus(
+        schoolId,
+        period,
+        source,
+        'studentsStatus',
+      ),
     };
   }
 
@@ -200,12 +261,20 @@ export class RegistersService {
     schoolId: string,
     dto: StudentRecordDto,
   ) {
-    const session = await this.prepare(user, schoolId);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
     try {
       const row = await this.prisma.studentRecord.create({
-        data: { schoolId, sessionId: session.id, collectedById: user.id, ...this.studentData(dto) },
+        data: {
+          schoolId,
+          sessionId: period.sessionId,
+          periodId: period.id,
+          source,
+          collectedById: user.id,
+          ...this.studentData(dto),
+        },
       });
-      await this.bumpStudents(schoolId, session.id, user.id);
+      await this.bumpStudents(schoolId, period, user.id, source);
       return row;
     } catch (e: any) {
       if (e?.code === 'P2002')
@@ -222,14 +291,15 @@ export class RegistersService {
     rowId: string,
     dto: StudentRecordDto,
   ) {
-    const session = await this.prepare(user, schoolId);
-    await this.ownedRow('studentRecord', rowId, schoolId, session.id);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
+    await this.ownedRow('studentRecord', rowId, schoolId, period.id, source);
     try {
       const row = await this.prisma.studentRecord.update({
         where: { id: rowId },
         data: this.studentData(dto),
       });
-      await this.bumpStudents(schoolId, session.id, user.id);
+      await this.bumpStudents(schoolId, period, user.id, source);
       return row;
     } catch (e: any) {
       if (e?.code === 'P2002')
@@ -241,24 +311,32 @@ export class RegistersService {
   }
 
   async removeStudent(user: RequestUser, schoolId: string, rowId: string) {
-    const session = await this.prepare(user, schoolId);
-    await this.ownedRow('studentRecord', rowId, schoolId, session.id);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
+    await this.ownedRow('studentRecord', rowId, schoolId, period.id, source);
     await this.prisma.studentRecord.delete({ where: { id: rowId } });
-    await this.bumpStudents(schoolId, session.id, user.id);
+    await this.bumpStudents(schoolId, period, user.id, source);
     return { message: 'Student removed.' };
   }
 
   async submitStudents(user: RequestUser, schoolId: string) {
-    const session = await this.prepare(user, schoolId);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
     const count = await this.prisma.studentRecord.count({
-      where: { schoolId, sessionId: session.id },
+      where: { schoolId, periodId: period.id, source },
     });
     if (count === 0) {
       throw new BadRequestException(
         'Add at least one student before submitting.',
       );
     }
-    const visit = await this.schools.ensureVisit(schoolId, session.id, user.id);
+    const visit = await this.schools.ensureVisit(
+      schoolId,
+      period.id,
+      period.sessionId,
+      user.id,
+      source,
+    );
     await this.schools.setSectionStatus(
       visit.id,
       'studentsStatus',
@@ -293,16 +371,19 @@ export class RegistersService {
 
   private async bumpStudents(
     schoolId: string,
-    sessionId: string,
+    period: Period,
     userId: string,
+    source: CaptureSource,
   ) {
     const count = await this.prisma.studentRecord.count({
-      where: { schoolId, sessionId },
+      where: { schoolId, periodId: period.id, source },
     });
     await this.refreshSection(
       schoolId,
-      sessionId,
+      period.id,
+      period.sessionId,
       userId,
+      source,
       'studentsStatus',
       count,
     );
@@ -311,28 +392,42 @@ export class RegistersService {
   // ─── Staff ───────────────────────────────────────────────────────────────────
 
   async listStaff(user: RequestUser, schoolId: string) {
-    const session = await this.sessionScope(user, schoolId);
-    const rows = session
+    const period = await this.periodScope(user, schoolId);
+    const source = sourceForUser(user);
+    const rows = period
       ? await this.prisma.staffRecord.findMany({
-          where: { schoolId, sessionId: session.id },
+          where: { schoolId, periodId: period.id, source },
           orderBy: [{ isHeadTeacher: 'desc' }, { lastName: 'asc' }],
         })
       : [];
     return {
-      session,
+      session: period ? { id: period.sessionId } : null,
       rows,
-      status: await this.sectionStatus(schoolId, session, 'staffStatus'),
+      status: await this.sectionStatus(schoolId, period, source, 'staffStatus'),
     };
   }
 
   async createStaff(user: RequestUser, schoolId: string, dto: StaffRecordDto) {
-    const session = await this.prepare(user, schoolId);
-    await this.assertSingleHeadTeacher(schoolId, session.id, dto.isHeadTeacher);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
+    await this.assertSingleHeadTeacher(
+      schoolId,
+      period.id,
+      source,
+      dto.isHeadTeacher,
+    );
     try {
       const row = await this.prisma.staffRecord.create({
-        data: { schoolId, sessionId: session.id, collectedById: user.id, ...this.staffData(dto) },
+        data: {
+          schoolId,
+          sessionId: period.sessionId,
+          periodId: period.id,
+          source,
+          collectedById: user.id,
+          ...this.staffData(dto),
+        },
       });
-      await this.bumpStaff(schoolId, session.id, user.id);
+      await this.bumpStaff(schoolId, period, user.id, source);
       return row;
     } catch (e: any) {
       if (e?.code === 'P2002')
@@ -349,11 +444,13 @@ export class RegistersService {
     rowId: string,
     dto: StaffRecordDto,
   ) {
-    const session = await this.prepare(user, schoolId);
-    await this.ownedRow('staffRecord', rowId, schoolId, session.id);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
+    await this.ownedRow('staffRecord', rowId, schoolId, period.id, source);
     await this.assertSingleHeadTeacher(
       schoolId,
-      session.id,
+      period.id,
+      source,
       dto.isHeadTeacher,
       rowId,
     );
@@ -362,7 +459,7 @@ export class RegistersService {
         where: { id: rowId },
         data: this.staffData(dto),
       });
-      await this.bumpStaff(schoolId, session.id, user.id);
+      await this.bumpStaff(schoolId, period, user.id, source);
       return row;
     } catch (e: any) {
       if (e?.code === 'P2002')
@@ -374,24 +471,32 @@ export class RegistersService {
   }
 
   async removeStaff(user: RequestUser, schoolId: string, rowId: string) {
-    const session = await this.prepare(user, schoolId);
-    await this.ownedRow('staffRecord', rowId, schoolId, session.id);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
+    await this.ownedRow('staffRecord', rowId, schoolId, period.id, source);
     await this.prisma.staffRecord.delete({ where: { id: rowId } });
-    await this.bumpStaff(schoolId, session.id, user.id);
+    await this.bumpStaff(schoolId, period, user.id, source);
     return { message: 'Staff member removed.' };
   }
 
   async submitStaff(user: RequestUser, schoolId: string) {
-    const session = await this.prepare(user, schoolId);
+    const period = await this.prepare(user, schoolId);
+    const source = sourceForUser(user);
     const count = await this.prisma.staffRecord.count({
-      where: { schoolId, sessionId: session.id },
+      where: { schoolId, periodId: period.id, source },
     });
     if (count === 0) {
       throw new BadRequestException(
         'Add at least one staff member before submitting.',
       );
     }
-    const visit = await this.schools.ensureVisit(schoolId, session.id, user.id);
+    const visit = await this.schools.ensureVisit(
+      schoolId,
+      period.id,
+      period.sessionId,
+      user.id,
+      source,
+    );
     await this.schools.setSectionStatus(
       visit.id,
       'staffStatus',
@@ -421,10 +526,12 @@ export class RegistersService {
     };
   }
 
-  // Only one head teacher / principal per school per session (guide §4).
+  // Only one head teacher / principal per school per PERIOD (guide §4), scoped to
+  // the capture channel so an inspector and a principal register independently.
   private async assertSingleHeadTeacher(
     schoolId: string,
-    sessionId: string,
+    periodId: string,
+    source: CaptureSource,
     isHeadTeacher: boolean,
     excludeId?: string,
   ) {
@@ -432,7 +539,8 @@ export class RegistersService {
     const existing = await this.prisma.staffRecord.findFirst({
       where: {
         schoolId,
-        sessionId,
+        periodId,
+        source,
         isHeadTeacher: true,
         ...(excludeId ? { id: { not: excludeId } } : {}),
       },
@@ -444,26 +552,46 @@ export class RegistersService {
     }
   }
 
-  private async bumpStaff(schoolId: string, sessionId: string, userId: string) {
+  private async bumpStaff(
+    schoolId: string,
+    period: Period,
+    userId: string,
+    source: CaptureSource,
+  ) {
     const count = await this.prisma.staffRecord.count({
-      where: { schoolId, sessionId },
+      where: { schoolId, periodId: period.id, source },
     });
-    await this.refreshSection(schoolId, sessionId, userId, 'staffStatus', count);
+    await this.refreshSection(
+      schoolId,
+      period.id,
+      period.sessionId,
+      userId,
+      source,
+      'staffStatus',
+      count,
+    );
   }
 
   // ─── Shared helpers ──────────────────────────────────────────────────────────
 
-  // Confirm a row belongs to this school + current session before mutating it.
+  // Confirm a row belongs to this school + current PERIOD + capture channel before
+  // mutating it (so a principal can't edit an inspector's row, or a closed period's).
   private async ownedRow(
     model: 'ascRecord' | 'studentRecord' | 'staffRecord',
     rowId: string,
     schoolId: string,
-    sessionId: string,
+    periodId: string,
+    source: CaptureSource,
   ) {
     const row = await (this.prisma[model] as any).findUnique({
       where: { id: rowId },
     });
-    if (!row || row.schoolId !== schoolId || row.sessionId !== sessionId) {
+    if (
+      !row ||
+      row.schoolId !== schoolId ||
+      row.periodId !== periodId ||
+      row.source !== source
+    ) {
       throw new NotFoundException('Record not found.');
     }
     return row;
@@ -471,12 +599,15 @@ export class RegistersService {
 
   private async sectionStatus(
     schoolId: string,
-    session: { id: string } | null,
+    period: Period | null,
+    source: CaptureSource,
     field: 'ascStatus' | 'studentsStatus' | 'staffStatus',
   ): Promise<CaptureStatus> {
-    if (!session) return CaptureStatus.NOT_STARTED;
+    if (!period) return CaptureStatus.NOT_STARTED;
     const visit = await this.prisma.schoolVisit.findUnique({
-      where: { schoolId_sessionId: { schoolId, sessionId: session.id } },
+      where: {
+        schoolId_periodId_source: { schoolId, periodId: period.id, source },
+      },
     });
     return (visit?.[field] as CaptureStatus) ?? CaptureStatus.NOT_STARTED;
   }

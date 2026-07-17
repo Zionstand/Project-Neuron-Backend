@@ -5,12 +5,19 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { SessionsService } from '../sessions/sessions.service';
-import { SchoolsService, type RequestUser } from './schools.service';
+import {
+  SchoolsService,
+  sourceForUser,
+  type RequestUser,
+} from './schools.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
-import { CaptureStatus } from '../generated/prisma/client';
+import { CaptureStatus, CaptureSource } from '../generated/prisma/client';
 import { MediaUploadDto, MediaMetaDto } from './dto/media.dto';
 
 const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/heic'];
+
+// The current capture period, carrying its session.
+type Period = { id: string; sessionId: string };
 
 @Injectable()
 export class MediaService {
@@ -23,20 +30,23 @@ export class MediaService {
 
   async list(user: RequestUser, schoolId: string) {
     await this.schools.requireScopedSchool(user, schoolId);
-    const session = await this.sessions.findCurrent();
-    const rows = session
+    const period = await this.sessions.findCurrentPeriod();
+    const source = sourceForUser(user);
+    const rows = period
       ? await this.prisma.schoolMedia.findMany({
-          where: { schoolId, sessionId: session.id },
+          where: { schoolId, periodId: period.id, source },
           orderBy: [{ isPrimary: 'desc' }, { createdAt: 'desc' }],
         })
       : [];
-    const visit = session
+    const visit = period
       ? await this.prisma.schoolVisit.findUnique({
-          where: { schoolId_sessionId: { schoolId, sessionId: session.id } },
+          where: {
+            schoolId_periodId_source: { schoolId, periodId: period.id, source },
+          },
         })
       : null;
     return {
-      session,
+      session: period ? { id: period.sessionId } : null,
       rows: rows.map((r) => this.withSignedUrl(r)),
       status: visit?.mediaStatus ?? CaptureStatus.NOT_STARTED,
     };
@@ -62,8 +72,15 @@ export class MediaService {
       );
     }
     await this.schools.requireScopedSchool(user, schoolId);
-    const session = await this.sessions.getCurrentOrThrow();
-    await this.schools.ensureVisit(schoolId, session.id, user.id);
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    const source = sourceForUser(user);
+    await this.schools.ensureVisit(
+      schoolId,
+      period.id,
+      period.sessionId,
+      user.id,
+      source,
+    );
 
     const result = await this.cloudinary.uploadImage(
       file.buffer,
@@ -73,7 +90,7 @@ export class MediaService {
     const makePrimary = dto.isPrimary === 'true';
     if (makePrimary) {
       await this.prisma.schoolMedia.updateMany({
-        where: { schoolId, sessionId: session.id, isPrimary: true },
+        where: { schoolId, periodId: period.id, source, isPrimary: true },
         data: { isPrimary: false },
       });
     }
@@ -81,7 +98,9 @@ export class MediaService {
     const row = await this.prisma.schoolMedia.create({
       data: {
         schoolId,
-        sessionId: session.id,
+        sessionId: period.sessionId,
+        periodId: period.id,
+        source,
         uploadedById: user.id,
         category: dto.category,
         caption: dto.caption,
@@ -98,7 +117,7 @@ export class MediaService {
       },
     });
 
-    await this.bump(schoolId, session.id, user.id);
+    await this.bump(schoolId, period, user.id, source);
     return this.withSignedUrl(row);
   }
 
@@ -109,13 +128,14 @@ export class MediaService {
     dto: MediaMetaDto,
   ) {
     await this.schools.requireScopedSchool(user, schoolId);
-    const session = await this.sessions.getCurrentOrThrow();
-    const existing = await this.owned(mediaId, schoolId, session.id);
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    const source = sourceForUser(user);
+    const existing = await this.owned(mediaId, schoolId, period.id, source);
 
     const makePrimary = dto.isPrimary === 'true';
     if (makePrimary && !existing.isPrimary) {
       await this.prisma.schoolMedia.updateMany({
-        where: { schoolId, sessionId: session.id, isPrimary: true },
+        where: { schoolId, periodId: period.id, source, isPrimary: true },
         data: { isPrimary: false },
       });
     }
@@ -133,27 +153,35 @@ export class MediaService {
 
   async remove(user: RequestUser, schoolId: string, mediaId: string) {
     await this.schools.requireScopedSchool(user, schoolId);
-    const session = await this.sessions.getCurrentOrThrow();
-    const existing = await this.owned(mediaId, schoolId, session.id);
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    const source = sourceForUser(user);
+    const existing = await this.owned(mediaId, schoolId, period.id, source);
 
     await this.cloudinary.deleteImage(existing.publicId);
     await this.prisma.schoolMedia.delete({ where: { id: mediaId } });
-    await this.bump(schoolId, session.id, user.id);
+    await this.bump(schoolId, period, user.id, source);
     return { message: 'Image removed.' };
   }
 
   async submit(user: RequestUser, schoolId: string) {
     await this.schools.requireScopedSchool(user, schoolId);
-    const session = await this.sessions.getCurrentOrThrow();
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    const source = sourceForUser(user);
     const count = await this.prisma.schoolMedia.count({
-      where: { schoolId, sessionId: session.id },
+      where: { schoolId, periodId: period.id, source },
     });
     if (count === 0) {
       throw new BadRequestException(
         'Upload at least one image before submitting.',
       );
     }
-    const visit = await this.schools.ensureVisit(schoolId, session.id, user.id);
+    const visit = await this.schools.ensureVisit(
+      schoolId,
+      period.id,
+      period.sessionId,
+      user.id,
+      source,
+    );
     await this.schools.setSectionStatus(
       visit.id,
       'mediaStatus',
@@ -162,21 +190,42 @@ export class MediaService {
     return { message: 'Media capture submitted.' };
   }
 
-  private async owned(mediaId: string, schoolId: string, sessionId: string) {
+  private async owned(
+    mediaId: string,
+    schoolId: string,
+    periodId: string,
+    source: CaptureSource,
+  ) {
     const row = await this.prisma.schoolMedia.findUnique({
       where: { id: mediaId },
     });
-    if (!row || row.schoolId !== schoolId || row.sessionId !== sessionId) {
+    if (
+      !row ||
+      row.schoolId !== schoolId ||
+      row.periodId !== periodId ||
+      row.source !== source
+    ) {
       throw new NotFoundException('Image not found.');
     }
     return row;
   }
 
-  private async bump(schoolId: string, sessionId: string, userId: string) {
+  private async bump(
+    schoolId: string,
+    period: Period,
+    userId: string,
+    source: CaptureSource,
+  ) {
     const count = await this.prisma.schoolMedia.count({
-      where: { schoolId, sessionId },
+      where: { schoolId, periodId: period.id, source },
     });
-    const visit = await this.schools.ensureVisit(schoolId, sessionId, userId);
+    const visit = await this.schools.ensureVisit(
+      schoolId,
+      period.id,
+      period.sessionId,
+      userId,
+      source,
+    );
     await this.schools.setSectionStatus(
       visit.id,
       'mediaStatus',

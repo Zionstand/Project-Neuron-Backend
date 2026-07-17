@@ -5,6 +5,7 @@ import {
   Param,
   Post,
   Put,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -32,11 +33,16 @@ export class SchoolsController {
     return this.schoolsService.listForUser(req.user);
   }
 
-  // School master record + current-session visit + security assessment.
+  // School master record + visit + security for a capture period (defaults to the
+  // current one; pass ?periodId to view a past period read-only).
   @Roles(...CAN_READ_SCHOOL_REGISTRY)
   @Get(':id')
-  detail(@Req() req: any, @Param('id') id: string) {
-    return this.schoolsService.getDetail(req.user, id);
+  detail(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Query('periodId') periodId?: string,
+  ) {
+    return this.schoolsService.getDetail(req.user, id, periodId);
   }
 
   // Save the security & vulnerability assessment as a draft (partial allowed).

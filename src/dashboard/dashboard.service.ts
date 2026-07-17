@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { SchoolsService, type RequestUser } from '../schools/schools.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SessionsService } from '../sessions/sessions.service';
-import { CaptureStatus } from '../generated/prisma/client';
+import { CaptureStatus, CaptureSource } from '../generated/prisma/client';
 
 @Injectable()
 export class DashboardService {
@@ -59,6 +59,7 @@ export class DashboardService {
   // State-wide (scoped) overview for SYS_ADMIN / leadership roles.
   async adminSummary(user: RequestUser) {
     const session = await this.sessions.findCurrent();
+    const period = await this.sessions.findCurrentPeriod();
     const scope = this.schools.scopeWhere(user);
 
     const blank = {
@@ -82,12 +83,18 @@ export class DashboardService {
       where: { role: 'LIE', accountStatus: 'ACTIVE' },
     });
 
-    if (!session || total === 0) {
+    if (!session || !period || total === 0) {
       return { ...blank, totals: { schools: total, activeInspectors, enrolment: 0 } };
     }
 
+    // Admin metrics reflect the official inspector record for the CURRENT capture
+    // period only; principal self-service submissions are a separate source.
     const visits = await this.prisma.schoolVisit.findMany({
-      where: { sessionId: session.id, schoolId: { in: ids } },
+      where: {
+        periodId: period.id,
+        schoolId: { in: ids },
+        source: CaptureSource.INSPECTOR,
+      },
       select: {
         schoolId: true,
         overallStatus: true,
@@ -140,8 +147,9 @@ export class DashboardService {
     // Risk tiers from submitted/verified security profiles.
     const profiles = await this.prisma.schoolSecurityProfile.findMany({
       where: {
-        sessionId: session.id,
+        periodId: period.id,
         schoolId: { in: ids },
+        source: CaptureSource.INSPECTOR,
         recordStatus: { in: [CaptureStatus.SUBMITTED, CaptureStatus.VERIFIED] },
       },
       select: { riskTier: true },
@@ -153,7 +161,11 @@ export class DashboardService {
 
     // Total enrolment captured this session.
     const enrolAgg = await this.prisma.ascRecord.aggregate({
-      where: { sessionId: session.id, schoolId: { in: ids } },
+      where: {
+        periodId: period.id,
+        schoolId: { in: ids },
+        source: CaptureSource.INSPECTOR,
+      },
       _sum: { enrolmentCount: true },
     });
 

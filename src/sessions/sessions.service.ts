@@ -28,6 +28,26 @@ export class SessionsService {
     return session;
   }
 
+  // The live capture target = the current session's current capture period. Capture
+  // writes always go here; closed periods are read-only history.
+  async findCurrentPeriod() {
+    const session = await this.findCurrent();
+    if (!session) return null;
+    return this.prisma.capturePeriod.findFirst({
+      where: { sessionId: session.id, isCurrent: true },
+    });
+  }
+
+  async getCurrentPeriodOrThrow() {
+    const period = await this.findCurrentPeriod();
+    if (!period) {
+      throw new NotFoundException(
+        'No active capture period has been configured for the current session.',
+      );
+    }
+    return period;
+  }
+
   // ─── Admin management ───────────────────────────────────────────────────────
 
   listAll() {

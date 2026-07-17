@@ -6,7 +6,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { SessionsService } from '../sessions/sessions.service';
 import type { Prisma } from '../generated/prisma/client';
-import { CaptureStatus } from '../generated/prisma/client';
+import { CaptureStatus, CaptureSource } from '../generated/prisma/client';
 import { SecurityAssessmentDto } from './dto/security-assessment.dto';
 import { computeRiskScores } from './risk-score';
 
@@ -53,6 +53,16 @@ export interface RequestUser {
   assignedLga: string | null;
   assignedZone: string | null;
   assignedCluster: string | null;
+  assignedSchoolId: string | null;
+}
+
+// Which capture channel a caller writes to. Principals produce a SEPARATE
+// PRINCIPAL-source record that coexists with the inspector's; everyone else
+// writes the INSPECTOR record. Part of the unique key on every capture table.
+export function sourceForUser(user: RequestUser): CaptureSource {
+  return user.role === 'PRINCIPAL'
+    ? CaptureSource.PRINCIPAL
+    : CaptureSource.INSPECTOR;
 }
 
 export interface SchoolWorklistItem {
@@ -89,14 +99,22 @@ export class SchoolsService {
   ) {}
 
   // Geographic scoping is enforced HERE, not in the guard (RBAC Rule 3).
-  // LIE → their assigned LGA; ZONAL_COORD → their zone; EMIS_OFFICER / SYS_ADMIN
-  // → state-wide. A LIE with no assigned LGA sees nothing.
+  // ZONAL_COORD → their zone; INSPECT_OFFICER → their cluster; EMIS_OFFICER /
+  // SYS_ADMIN / leadership → state-wide; PRINCIPAL → their single school.
+  //
+  // ⚠️ LIE is state-wide here by product decision (2026-07 — MoEST/Alexander want
+  // an LIE to see every school). This DEVIATES from RBAC v1.1 ("LIE = LGA-scoped")
+  // and must be signed off by Alexander before production.
   private scopeFor(user: RequestUser): Prisma.SchoolWhereInput | null {
     const where: Prisma.SchoolWhereInput = { isActive: true };
     switch (user.role) {
       case 'LIE':
-        if (!user.assignedLga) return null;
-        where.lgaName = user.assignedLga;
+        // State-wide (see note above; was `where.lgaName = user.assignedLga`).
+        return where;
+      case 'PRINCIPAL':
+        // School head — scoped to exactly the one school they're bound to.
+        if (!user.assignedSchoolId) return null;
+        where.id = user.assignedSchoolId;
         return where;
       case 'ZONAL_COORD':
         if (user.assignedZone) where.zoneName = user.assignedZone;
@@ -128,16 +146,22 @@ export class SchoolsService {
   }> {
     const where = this.scopeFor(user);
     const session = await this.sessions.findCurrent();
+    const period = await this.sessions.findCurrentPeriod();
+    const source = sourceForUser(user);
 
     if (!where) return { session, schools: [] };
 
     const schools = await this.prisma.school.findMany({
       where,
       orderBy: { name: 'asc' },
-      // Filter to the current session; when none is configured the sentinel id
-      // matches nothing, so every school comes back with an empty visits array.
+      // Filter to the current capture PERIOD AND the caller's own channel; when no
+      // period is configured the sentinel id matches nothing, so every school comes
+      // back with an empty visits array.
       include: {
-        visits: { where: { sessionId: session?.id ?? '__no_session__' }, take: 1 },
+        visits: {
+          where: { periodId: period?.id ?? '__no_period__', source },
+          take: 1,
+        },
       },
     });
 
@@ -177,6 +201,18 @@ export class SchoolsService {
     };
   }
 
+  // Minimal, unauthenticated school directory for the self-registration school
+  // picker (a prospective principal has no account yet). PII-free: id/name/code/LGA
+  // of active schools only.
+  async listPublic() {
+    const schools = await this.prisma.school.findMany({
+      where: { isActive: true },
+      orderBy: [{ lgaName: 'asc' }, { name: 'asc' }],
+      select: { id: true, name: true, code: true, lgaName: true },
+    });
+    return { schools };
+  }
+
   // ─── Single school + assessment ─────────────────────────────────────────────
 
   // Fetch a school only if it falls within the caller's scope; otherwise 404
@@ -185,8 +221,10 @@ export class SchoolsService {
   async requireScopedSchool(user: RequestUser, id: string) {
     const scope = this.scopeFor(user);
     if (!scope) throw new NotFoundException('School not found.');
+    // AND the requested id with the scope — never spread it in, or a scope that
+    // constrains on `id` itself (PRINCIPAL) would be clobbered by the param.
     const school = await this.prisma.school.findFirst({
-      where: { ...scope, id },
+      where: { AND: [scope, { id }] },
     });
     if (!school) throw new NotFoundException('School not found.');
     return school;
@@ -211,25 +249,58 @@ export class SchoolsService {
     'hadSecurityIncident',
   ];
 
-  async getDetail(user: RequestUser, id: string) {
-    const school = await this.requireScopedSchool(user, id);
-    const session = await this.sessions.findCurrent();
+  // Resolve which capture period a read targets: an explicit historical period, or
+  // the current one. Returns the period plus whether it is the current (writable)
+  // one — a non-current period is read-only history.
+  async resolveViewPeriod(periodId?: string) {
+    const current = await this.sessions.findCurrentPeriod();
+    const period = periodId
+      ? await this.prisma.capturePeriod.findUnique({ where: { id: periodId } })
+      : current;
+    const readOnly = !period || !current || period.id !== current.id;
+    return { period, current, readOnly };
+  }
 
-    const visit = session
-      ? await this.prisma.schoolVisit.findUnique({
-          where: { schoolId_sessionId: { schoolId: id, sessionId: session.id } },
+  async getDetail(user: RequestUser, id: string, periodId?: string) {
+    const school = await this.requireScopedSchool(user, id);
+    const source = sourceForUser(user);
+    const { period, readOnly } = await this.resolveViewPeriod(periodId);
+    // Session name for display comes from the period's session.
+    const sess = period
+      ? await this.prisma.session.findUnique({
+          where: { id: period.sessionId },
+          select: { id: true, name: true },
         })
       : null;
 
-    const security = session
+    const visit = period
+      ? await this.prisma.schoolVisit.findUnique({
+          where: {
+            schoolId_periodId_source: { schoolId: id, periodId: period.id, source },
+          },
+        })
+      : null;
+
+    const security = period
       ? await this.prisma.schoolSecurityProfile.findUnique({
-          where: { schoolId_sessionId: { schoolId: id, sessionId: session.id } },
+          where: {
+            schoolId_periodId_source: { schoolId: id, periodId: period.id, source },
+          },
         })
       : null;
 
     return {
       school,
-      session: session ? { id: session.id, name: session.name } : null,
+      session: sess,
+      period: period
+        ? {
+            id: period.id,
+            name: period.name,
+            isCurrent: period.isCurrent,
+            closedAt: period.closedAt,
+          }
+        : null,
+      readOnly,
       visit: visit
         ? {
             id: visit.id,
@@ -249,14 +320,17 @@ export class SchoolsService {
 
   // Create the visit row on first capture (NOT_STARTED until a section starts),
   // claiming it for this inspector if unclaimed. Public for the register services.
+  // `periodId` + `source` keep each capture round / channel a separate record.
   async ensureVisit(
     schoolId: string,
+    periodId: string,
     sessionId: string,
     inspectorId: string,
+    source: CaptureSource = CaptureSource.INSPECTOR,
   ) {
     return this.prisma.schoolVisit.upsert({
-      where: { schoolId_sessionId: { schoolId, sessionId } },
-      create: { schoolId, sessionId, inspectorId },
+      where: { schoolId_periodId_source: { schoolId, periodId, source } },
+      create: { schoolId, periodId, sessionId, inspectorId, source },
       update: {},
     });
   }
@@ -267,20 +341,33 @@ export class SchoolsService {
     dto: SecurityAssessmentDto,
   ) {
     await this.requireScopedSchool(user, id);
-    const session = await this.sessions.getCurrentOrThrow();
-    const visit = await this.ensureVisit(id, session.id, user.id);
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    const source = sourceForUser(user);
+    const visit = await this.ensureVisit(
+      id,
+      period.id,
+      period.sessionId,
+      user.id,
+      source,
+    );
 
     // Don't downgrade an already-submitted/verified section to DRAFT on edit.
     const existing = await this.prisma.schoolSecurityProfile.findUnique({
-      where: { schoolId_sessionId: { schoolId: id, sessionId: session.id } },
+      where: {
+        schoolId_periodId_source: { schoolId: id, periodId: period.id, source },
+      },
     });
     const status = existing?.recordStatus ?? CaptureStatus.DRAFT;
 
     await this.prisma.schoolSecurityProfile.upsert({
-      where: { schoolId_sessionId: { schoolId: id, sessionId: session.id } },
+      where: {
+        schoolId_periodId_source: { schoolId: id, periodId: period.id, source },
+      },
       create: {
         schoolId: id,
-        sessionId: session.id,
+        sessionId: period.sessionId,
+        periodId: period.id,
+        source,
         collectedById: user.id,
         recordStatus: CaptureStatus.DRAFT,
         ...dto,
@@ -298,11 +385,20 @@ export class SchoolsService {
     dto: SecurityAssessmentDto,
   ) {
     await this.requireScopedSchool(user, id);
-    const session = await this.sessions.getCurrentOrThrow();
-    const visit = await this.ensureVisit(id, session.id, user.id);
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    const source = sourceForUser(user);
+    const visit = await this.ensureVisit(
+      id,
+      period.id,
+      period.sessionId,
+      user.id,
+      source,
+    );
 
     const existing = await this.prisma.schoolSecurityProfile.findUnique({
-      where: { schoolId_sessionId: { schoolId: id, sessionId: session.id } },
+      where: {
+        schoolId_periodId_source: { schoolId: id, periodId: period.id, source },
+      },
     });
 
     // The complete picture = whatever was saved before, overlaid with this payload.
@@ -312,10 +408,14 @@ export class SchoolsService {
     const scores = computeRiskScores(effective as SecurityAssessmentDto);
 
     await this.prisma.schoolSecurityProfile.upsert({
-      where: { schoolId_sessionId: { schoolId: id, sessionId: session.id } },
+      where: {
+        schoolId_periodId_source: { schoolId: id, periodId: period.id, source },
+      },
       create: {
         schoolId: id,
-        sessionId: session.id,
+        sessionId: period.sessionId,
+        periodId: period.id,
+        source,
         collectedById: user.id,
         ...dto,
         ...scores,

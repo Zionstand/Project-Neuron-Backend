@@ -35,6 +35,10 @@ model User {
   assignedLga     String? // LIE: assigned LGA
   assignedZone    String? // ZONAL_COORD: assigned zone
   assignedCluster String? // INSPECT_OFFICER: assigned school cluster
+  // PRINCIPAL: the single school this head is bound to. Scalar FK (DB constraint
+  // added via DDL), mirroring the register tables — a principal sees/uploads for
+  // exactly this school. Null for every other role.
+  assignedSchoolId String?
 
   // SERVICE_ACCOUNT holders are flagged system accounts, not human users (RBAC Section 7).
   isServiceAccount Boolean @default(false)
@@ -63,6 +67,7 @@ model User {
   @@index([actionById])
   @@index([accountStatus])
   @@index([role])
+  @@index([assignedSchoolId])
 }
 
 // RBAC roles — NEURON-RBAC-001 v1.1, Section 7. A user holds exactly one role.
@@ -75,6 +80,16 @@ enum Role {
   INSPECT_OFFICER // [v1.1] Directorate field officer. Cluster-scoped. Workflow submit.
   HOD_APPROVE // [v1.1] Director/Deputy Director. Directorate read + dashboard. No Module 4.
   SERVICE_ACCOUNT // [v1.1] System-to-system. No human JWT. Scoped to automated routes.
+  PRINCIPAL // School head. Self-registers, admin-approved, scoped to a single school. Self-service capture.
+}
+
+// Origin of a capture record. Principal-entered data is a SEPARATE submission that
+// coexists with inspector-entered data for the same school+session (so the two can
+// be compared/reconciled). Defaults to INSPECTOR so the existing capture flow is
+// unchanged. Part of the unique key on every capture table.
+enum CaptureSource {
+  INSPECTOR
+  PRINCIPAL
 }
 
 enum AccountStatus {
@@ -103,7 +118,31 @@ model Session {
 
   visits           SchoolVisit[]
   securityProfiles SchoolSecurityProfile[]
+  periods          CapturePeriod[]
 
+  @@index([isCurrent])
+}
+
+// A capture round WITHIN a session (e.g. a term or quarter). The SysAdmin defines
+// these; exactly one per session is `isCurrent` — the live capture target. All
+// capture writes go to the current period, so closed periods (`closedAt` set) are
+// read-only history. Blank each period: a fresh set of capture records per period.
+model CapturePeriod {
+  id        String    @id @default(uuid())
+  sessionId String
+  session   Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  name      String // e.g. "Term 1", "Q2"
+  sequence  Int    @default(1) // display / chronological order within the session
+  startDate DateTime?
+  endDate   DateTime?
+  isCurrent Boolean   @default(false)
+  closedAt  DateTime? // set when a newer period is activated; marks it read-only
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sessionId, name])
+  @@index([sessionId])
   @@index([isCurrent])
 }
 
@@ -186,10 +225,15 @@ model SchoolVisit {
   school    School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   sessionId String
   session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  // Capture round within the session. sessionId is kept denormalized alongside.
+  periodId  String
 
   // The LIE responsible for this visit (nullable until assigned/started).
   inspectorId String?
   inspector   User?   @relation("InspectorVisits", fields: [inspectorId], references: [id])
+
+  // Which channel produced this visit — inspector-run or principal self-service.
+  source CaptureSource @default(INSPECTOR)
 
   // Per-section progress (ASC, students, staff, security, media).
   ascStatus      CaptureStatus @default(NOT_STARTED)
@@ -203,9 +247,10 @@ model SchoolVisit {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([schoolId, sessionId])
+  @@unique([schoolId, periodId, source])
   @@index([inspectorId])
   @@index([overallStatus])
+  @@index([periodId])
 }
 
 // Fact_SchoolSecurity — School Security & Vulnerability Profile (Field Capture
@@ -220,8 +265,11 @@ model SchoolSecurityProfile {
   school        School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   sessionId     String
   session       Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  periodId      String
   collectedById String?
   collectedBy   User?   @relation("SecurityCollected", fields: [collectedById], references: [id])
+
+  source CaptureSource @default(INSPECTOR)
 
   // Module A — Location & Access
   distanceToMajorRoadKm    Float?
@@ -271,8 +319,9 @@ model SchoolSecurityProfile {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([schoolId, sessionId])
+  @@unique([schoolId, periodId, source])
   @@index([sessionId])
+  @@index([periodId])
   @@index([riskTier])
 }
 
@@ -313,7 +362,9 @@ model AscRecord {
   id            String  @id @default(uuid())
   schoolId      String
   sessionId     String
+  periodId      String
   collectedById String?
+  source        CaptureSource @default(INSPECTOR)
 
   classLevel     String // Pry1 … SSS3
   gender         Gender
@@ -325,8 +376,8 @@ model AscRecord {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([schoolId, sessionId, classLevel, gender])
-  @@index([schoolId, sessionId])
+  @@unique([schoolId, periodId, source, classLevel, gender])
+  @@index([schoolId, periodId])
 }
 
 // Fact_Students — Student Management Register (Field Capture Guide §3). One row
@@ -335,7 +386,9 @@ model StudentRecord {
   id            String  @id @default(uuid())
   schoolId      String
   sessionId     String
+  periodId      String
   collectedById String?
+  source        CaptureSource @default(INSPECTOR)
 
   studentCode String
   classLevel  String
@@ -363,8 +416,8 @@ model StudentRecord {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([schoolId, sessionId, studentCode])
-  @@index([schoolId, sessionId])
+  @@unique([schoolId, periodId, source, studentCode])
+  @@index([schoolId, periodId])
 }
 
 // Fact_Staff — Staff Management Register (Field Capture Guide §4). One row per
@@ -373,7 +426,9 @@ model StaffRecord {
   id            String  @id @default(uuid())
   schoolId      String
   sessionId     String
+  periodId      String
   collectedById String?
+  source        CaptureSource @default(INSPECTOR)
 
   staffCode   String
   firstName   String
@@ -397,8 +452,8 @@ model StaffRecord {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([schoolId, sessionId, staffCode])
-  @@index([schoolId, sessionId])
+  @@unique([schoolId, periodId, source, staffCode])
+  @@index([schoolId, periodId])
 }
 
 // Fact_SchoolMedia — School Media Capture (Field Capture Guide §6). One row per
@@ -409,7 +464,9 @@ model SchoolMedia {
   id           String  @id @default(uuid())
   schoolId     String
   sessionId    String
+  periodId     String
   uploadedById String?
+  source       CaptureSource @default(INSPECTOR)
 
   category  String // Module A | Module B | Module C | Module D | General
   caption   String
@@ -431,4 +488,5 @@ model SchoolMedia {
   updatedAt DateTime @updatedAt
 
   @@index([schoolId, sessionId])
+  @@index([schoolId, periodId])
 }

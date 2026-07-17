@@ -21,6 +21,7 @@ export class ProvisionUserDto {
   @IsOptional() @IsString() @MaxLength(120) assignedLga?: string;
   @IsOptional() @IsString() @MaxLength(120) assignedZone?: string;
   @IsOptional() @IsString() @MaxLength(120) assignedCluster?: string;
+  @IsOptional() @IsString() @MaxLength(64) assignedSchoolId?: string;
 }
 
 // Approve a PENDING registration — this is where the real role + scope are set.
@@ -29,6 +30,7 @@ export class ApproveUserDto {
   @IsOptional() @IsString() @MaxLength(120) assignedLga?: string;
   @IsOptional() @IsString() @MaxLength(120) assignedZone?: string;
   @IsOptional() @IsString() @MaxLength(120) assignedCluster?: string;
+  @IsOptional() @IsString() @MaxLength(64) assignedSchoolId?: string;
 }
 
 export class RejectUserDto {
@@ -41,6 +43,7 @@ export class UpdateUserDto {
   @IsOptional() @IsString() @MaxLength(120) assignedLga?: string;
   @IsOptional() @IsString() @MaxLength(120) assignedZone?: string;
   @IsOptional() @IsString() @MaxLength(120) assignedCluster?: string;
+  @IsOptional() @IsString() @MaxLength(64) assignedSchoolId?: string;
 }
 
 export const STATUS_ACTIONS = [
