@@ -5,6 +5,7 @@ import {
   IsArray,
   IsBoolean,
   IsIn,
+  IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -45,6 +46,7 @@ export class CreateSchoolDto {
   @IsOptional() @IsString() @MaxLength(300) address?: string;
   @IsOptional() @IsNumber() @Min(-90) @Max(90) latitude?: number;
   @IsOptional() @IsNumber() @Min(-180) @Max(180) longitude?: number;
+  @IsOptional() @IsInt() @Min(1800) @Max(2100) dateEstablished?: number;
   @IsOptional() @IsBoolean() isActive?: boolean;
 }
 
@@ -65,11 +67,16 @@ export class UpdateSchoolDto {
   @IsOptional() @IsString() @MaxLength(300) address?: string;
   @IsOptional() @IsNumber() @Min(-90) @Max(90) latitude?: number;
   @IsOptional() @IsNumber() @Min(-180) @Max(180) longitude?: number;
+  @IsOptional() @IsInt() @Min(1800) @Max(2100) dateEstablished?: number;
   @IsOptional() @IsBoolean() isActive?: boolean;
 }
 
 export class SetActiveDto {
   @IsBoolean() isActive: boolean;
+}
+
+export class GpsVerifyDto {
+  @IsBoolean() gpsVerified: boolean;
 }
 
 // Bulk import — upsert by code.

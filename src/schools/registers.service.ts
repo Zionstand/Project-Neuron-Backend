@@ -88,6 +88,22 @@ export class RegistersService {
     return new ConflictException(message);
   }
 
+  // Resolve a captured STRING to its normalized dimension FK id (best-effort; null
+  // if the value isn't in the reference table). Set alongside the string on save.
+  private async classLevelId(code: string): Promise<string | null> {
+    const row = await this.prisma.classLevel.findUnique({ where: { code } });
+    return row?.id ?? null;
+  }
+  private async qualId(code: string): Promise<string | null> {
+    const row = await this.prisma.qualificationType.findUnique({ where: { code } });
+    return row?.id ?? null;
+  }
+  private async subjectId(name?: string | null): Promise<string | null> {
+    if (!name) return null;
+    const row = await this.prisma.subjectArea.findUnique({ where: { name } });
+    return row?.id ?? null;
+  }
+
   // ─── ASC ───────────────────────────────────────────────────────────────────
 
   async listAsc(user: RequestUser, schoolId: string) {
@@ -123,6 +139,7 @@ export class RegistersService {
           source,
           collectedById: user.id,
           classLevel: dto.classLevel,
+          classLevelId: await this.classLevelId(dto.classLevel),
           gender: dto.gender as Gender,
           enrolmentCount: dto.enrolmentCount,
           newEntrants: dto.newEntrants,
@@ -160,6 +177,7 @@ export class RegistersService {
         where: { id: rowId },
         data: {
           classLevel: dto.classLevel,
+          classLevelId: await this.classLevelId(dto.classLevel),
           gender: dto.gender as Gender,
           enrolmentCount: dto.enrolmentCount,
           newEntrants: dto.newEntrants,
@@ -271,6 +289,7 @@ export class RegistersService {
           periodId: period.id,
           source,
           collectedById: user.id,
+          classLevelId: await this.classLevelId(dto.classLevel),
           ...this.studentData(dto),
         },
       });
@@ -297,7 +316,10 @@ export class RegistersService {
     try {
       const row = await this.prisma.studentRecord.update({
         where: { id: rowId },
-        data: this.studentData(dto),
+        data: {
+          classLevelId: await this.classLevelId(dto.classLevel),
+          ...this.studentData(dto),
+        },
       });
       await this.bumpStudents(schoolId, period, user.id, source);
       return row;
@@ -424,6 +446,8 @@ export class RegistersService {
           periodId: period.id,
           source,
           collectedById: user.id,
+          qualId: await this.qualId(dto.qualification),
+          subjectId: await this.subjectId(dto.subject),
           ...this.staffData(dto),
         },
       });
@@ -457,7 +481,11 @@ export class RegistersService {
     try {
       const row = await this.prisma.staffRecord.update({
         where: { id: rowId },
-        data: this.staffData(dto),
+        data: {
+          qualId: await this.qualId(dto.qualification),
+          subjectId: await this.subjectId(dto.subject),
+          ...this.staffData(dto),
+        },
       });
       await this.bumpStaff(schoolId, period, user.id, source);
       return row;

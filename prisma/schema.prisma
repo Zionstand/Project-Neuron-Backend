@@ -146,6 +146,95 @@ model CapturePeriod {
   @@index([isCurrent])
 }
 
+// ─── Dimension / reference tables (Field Capture Guide §1) ────────────────────
+// Normalized lookups the enumerator selects from. Admin-managed. Fact tables keep
+// their existing validated STRING (for display / scoring / unique keys) AND carry
+// a nullable FK id to the matching dim row (set on save) for clean BI joins.
+
+// Dim_Zone — education zone.
+model Zone {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lgas Lga[]
+
+  @@index([isActive])
+}
+
+// Dim_LGA — Local Government Area (33 in Oyo State), belongs to a zone.
+model Lga {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String   @unique
+  zoneId    String?
+  zone      Zone?    @relation(fields: [zoneId], references: [id])
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([zoneId])
+  @@index([isActive])
+}
+
+// Dim_ClassLevel — Pry1 … SSS3, with education level + sort order.
+model ClassLevel {
+  id             String   @id @default(uuid())
+  code           String   @unique // matches the AscRecord/StudentRecord classLevel string
+  name           String
+  educationLevel String? // Primary | Junior Secondary | Senior Secondary
+  sortOrder      Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+// Dim_QualificationType — staff qualifications (NCE, BSc, …).
+model QualificationType {
+  id        String   @id @default(uuid())
+  code      String   @unique // matches StaffRecord.qualification string
+  name      String
+  rank      Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+// Dim_SubjectArea — subjects a teacher may primarily teach.
+model SubjectArea {
+  id        String   @id @default(uuid())
+  name      String   @unique // matches StaffRecord.subject string
+  category  String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+// Dim_MediaCategory — photo/video categories with shooting instructions.
+model MediaCategory {
+  id               String   @id @default(uuid())
+  code             String   @unique // matches SchoolMedia.category string
+  name             String
+  appliesToModule  String? // Module A | B | C | D | General
+  mediaTypeAllowed String   @default("image") // image | video | both
+  maxFilesAllowed  Int?
+  description      String? // shown to the enumerator as shooting instructions
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([isActive])
+}
+
 enum SchoolType {
   PRIMARY
   JSS
@@ -187,6 +276,9 @@ model School {
   lgaName        String
   lgaCode        String?
   zoneName       String?
+  // Normalized FKs to the LGA/Zone reference tables (set alongside the strings).
+  lgaId          String?
+  zoneId         String?
   // Inspectorate cluster — the scoping key matched against
   // User.assignedCluster for INSPECT_OFFICER (RBAC Rule 3, service-layer).
   cluster        String?
@@ -195,6 +287,13 @@ model School {
   address        String?
   latitude       Float?
   longitude      Float?
+  // Dim_School extras (Field Capture Guide §1.4). GPS is the one field captured
+  // live at the gate; the metadata below records capture quality + supervisor sign-off.
+  dateEstablished     Int? // year founded
+  gpsAccuracyMetres   Float?
+  gpsSampleCount      Int?
+  gpsCaptureTimestamp DateTime?
+  gpsVerified         Boolean   @default(false)
   isActive       Boolean         @default(true)
 
   createdAt DateTime @default(now())
@@ -206,6 +305,8 @@ model School {
   @@index([lgaName])
   @@index([cluster])
   @@index([isActive])
+  @@index([lgaId])
+  @@index([zoneId])
 }
 
 // Capture lifecycle for a single section (matches the guide's
@@ -316,6 +417,9 @@ model SchoolSecurityProfile {
   recordStatus CaptureStatus @default(DRAFT)
   submittedAt  DateTime?
 
+  verifiedById String?
+  verifiedAt   DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -366,12 +470,17 @@ model AscRecord {
   collectedById String?
   source        CaptureSource @default(INSPECTOR)
 
-  classLevel     String // Pry1 … SSS3
+  classLevel     String // Pry1 … SSS3 (kept for display / unique key)
+  classLevelId   String? // FK → ClassLevel (normalized, set on save)
   gender         Gender
   enrolmentCount Int    @default(0)
   newEntrants    Int    @default(0)
   repeaters      Int    @default(0)
   dropoutCount   Int    @default(0)
+
+  // Verification provenance (Field Capture Guide — Verified_By / Verification_Date).
+  verifiedById String?
+  verifiedAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -390,13 +499,14 @@ model StudentRecord {
   collectedById String?
   source        CaptureSource @default(INSPECTOR)
 
-  studentCode String
-  classLevel  String
-  firstName   String
-  middleName  String?
-  lastName    String
-  dateOfBirth DateTime?
-  gender      Gender
+  studentCode  String
+  classLevel   String
+  classLevelId String? // FK → ClassLevel (normalized, set on save)
+  firstName    String
+  middleName   String?
+  lastName     String
+  dateOfBirth  DateTime?
+  gender       Gender
 
   stateOfOrigin String?
   lgaOfOrigin   String?
@@ -412,6 +522,9 @@ model StudentRecord {
   enrolmentDate      DateTime?
   exitDate           DateTime?
   exitReason         String? // Dropout | Transfer-Out | Completed | Deceased | Unknown
+
+  verifiedById String?
+  verifiedAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -441,13 +554,18 @@ model StaffRecord {
   staffType      String // Teaching | Non-Teaching
   employmentType String // Permanent | Contract | NYSC | Volunteer
   qualification  String // NCE | OND | HND | BSc | BEd | PGDE | MSc | MEd | PhD | Other
+  qualId         String? // FK → QualificationType (normalized, set on save)
   subject        String?
+  subjectId      String? // FK → SubjectArea (normalized, set on save)
 
   dateOfFirstAppointment DateTime?
   datePostedToSchool     DateTime?
   isResidentInCommunity  Boolean   @default(false)
   yearsAtCurrentSchool   Int?
   isHeadTeacher          Boolean   @default(false)
+
+  verifiedById String?
+  verifiedAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -457,20 +575,21 @@ model StaffRecord {
 }
 
 // Fact_SchoolMedia — School Media Capture (Field Capture Guide §6). One row per
-// uploaded file. IMAGES ONLY for now (no video). Binary lives in Cloudinary; we
-// store its public_id (for deletion) + secure_url + technical metadata. Scalar
-// FKs like the other registers.
+// uploaded file (image OR video). Binary lives in Cloudinary; we store its
+// public_id (for deletion + on-demand signing) + technical metadata. Scalar FKs
+// like the other registers.
 model SchoolMedia {
-  id           String  @id @default(uuid())
-  schoolId     String
-  sessionId    String
-  periodId     String
-  uploadedById String?
-  source       CaptureSource @default(INSPECTOR)
+  id             String  @id @default(uuid())
+  schoolId       String
+  sessionId      String
+  periodId       String
+  uploadedById   String?
+  source         CaptureSource @default(INSPECTOR)
 
-  category  String // Module A | Module B | Module C | Module D | General
-  caption   String
-  mediaType String @default("image")
+  category         String // Module A | Module B | Module C | Module D | General
+  mediaCategoryId  String? // FK → MediaCategory (normalized, set on save)
+  caption          String
+  mediaType        String @default("image") // image | video
 
   publicId         String // Cloudinary public_id (authenticated asset)
   fileUrl          String // Deprecated: no longer persisted (always ""); URLs are signed on demand from publicId
@@ -479,10 +598,19 @@ model SchoolMedia {
   bytes            Int?
   width            Int?
   height           Int?
-  gpsLatitude      Float?
+  videoDurationSecs Int? // videos only
+  gpsLatitude      Float? // from photo EXIF (best-effort)
   gpsLongitude     Float?
+  captureTimestamp DateTime? // from photo EXIF (best-effort)
 
   isPrimary Boolean @default(false)
+
+  // Supervisor lifecycle (Field Capture Guide §6).
+  isFlagged    Boolean @default(false)
+  flagReason   String?
+  isActive     Boolean @default(true)
+  verifiedById String?
+  verifiedAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

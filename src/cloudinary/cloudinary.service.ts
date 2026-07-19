@@ -50,15 +50,39 @@ export class CloudinaryService {
     });
   }
 
+  // Upload a video buffer as a private (authenticated) asset. Cloudinary returns
+  // `duration` (seconds) which we persist. Signed the same way as images.
+  uploadVideo(buffer: Buffer, folder: string): Promise<UploadApiResponse> {
+    return new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder,
+          resource_type: 'video',
+          type: 'authenticated',
+        },
+        (error, result) => {
+          if (error || !result) {
+            this.logger.error(`Cloudinary video upload failed: ${error?.message}`);
+            return reject(
+              error ?? new Error('Cloudinary returned no result.'),
+            );
+          }
+          resolve(result);
+        },
+      );
+      stream.end(buffer);
+    });
+  }
+
   // Generate a signed delivery URL for a private asset. When token auth is
   // enabled on the account (CLOUDINARY_AUTH_KEY set) the URL expires after
   // SIGNED_URL_TTL_SECONDS, per the briefing; otherwise it falls back to a
   // tamper-proof (non-expiring) signed URL. Callers MUST enforce access
   // control before calling this — signing does not check ownership.
-  signedUrl(publicId: string): string {
+  signedUrl(publicId: string, resourceType: 'image' | 'video' = 'image'): string {
     const authKey = process.env.CLOUDINARY_AUTH_KEY;
     const opts: Record<string, unknown> = {
-      resource_type: 'image',
+      resource_type: resourceType,
       type: 'authenticated',
       secure: true,
     };
@@ -70,10 +94,13 @@ export class CloudinaryService {
     return cloudinary.url(publicId, opts as never);
   }
 
-  async deleteImage(publicId: string): Promise<void> {
+  async deleteImage(
+    publicId: string,
+    resourceType: 'image' | 'video' = 'image',
+  ): Promise<void> {
     try {
       await cloudinary.uploader.destroy(publicId, {
-        resource_type: 'image',
+        resource_type: resourceType,
         type: 'authenticated',
       });
     } catch (e) {

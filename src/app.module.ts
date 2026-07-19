@@ -13,6 +13,7 @@ import { SchoolsModule } from './schools/schools.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { UsersModule } from './users/users.module';
 import { OversightModule } from './oversight/oversight.module';
+import { ReferenceModule } from './reference/reference.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { OversightModule } from './oversight/oversight.module';
     DashboardModule,
     UsersModule,
     OversightModule,
+    ReferenceModule,
   ],
   controllers: [AppController],
   providers: [

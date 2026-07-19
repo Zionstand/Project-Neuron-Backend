@@ -169,6 +169,8 @@ export class OversightService {
         data: { recordStatus: CaptureStatus.VERIFIED },
       });
     }
+    // Stamp Verified_By / Verification_Date on the section's fact rows (guide §).
+    await this.stampVerifier(section, schoolId, visit.periodId, user.id);
     await this.audit.log({
       actorId: user.id,
       action: 'SECTION_VERIFIED',
@@ -205,6 +207,8 @@ export class OversightService {
         data: { recordStatus: CaptureStatus.DRAFT },
       });
     }
+    // Clear the verification stamp when a section is sent back.
+    await this.stampVerifier(section, schoolId, visit.periodId, null);
     await this.audit.log({
       actorId: user.id,
       action: 'SECTION_RETURNED',
@@ -214,6 +218,76 @@ export class OversightService {
       metadata: { section },
     });
     return { message: `${SECTION_LABEL[section]} returned for revision.` };
+  }
+
+  // Supervisor flag on a single media file (Field Capture Guide §6). A non-empty
+  // reason flags it; an empty reason clears the flag.
+  async flagMedia(
+    user: RequestUser,
+    schoolId: string,
+    mediaId: string,
+    reason?: string,
+  ) {
+    await this.schools.requireScopedSchool(user, schoolId);
+    const media = await this.prisma.schoolMedia.findFirst({
+      where: { id: mediaId, schoolId },
+      select: { id: true },
+    });
+    if (!media) throw new BadRequestException('Media file not found.');
+    const flagged = !!reason?.trim();
+    await this.prisma.schoolMedia.update({
+      where: { id: mediaId },
+      data: {
+        isFlagged: flagged,
+        flagReason: flagged ? reason!.trim() : null,
+      },
+    });
+    await this.audit.log({
+      actorId: user.id,
+      action: flagged ? 'MEDIA_FLAGGED' : 'MEDIA_UNFLAGGED',
+      targetType: 'MEDIA',
+      targetId: mediaId,
+      targetLabel: schoolId,
+      metadata: { reason: reason ?? null },
+    });
+    return { message: flagged ? 'Media flagged.' : 'Flag cleared.' };
+  }
+
+  // Stamp (or clear, when actorId is null) Verified_By / Verification_Date on all
+  // INSPECTOR-source fact rows of a section for a school+period. Mirrors the guide's
+  // per-record verification fields.
+  private async stampVerifier(
+    section: SectionKey,
+    schoolId: string,
+    periodId: string,
+    actorId: string | null,
+  ) {
+    const where = {
+      schoolId,
+      periodId,
+      source: CaptureSource.INSPECTOR,
+    };
+    const data = {
+      verifiedById: actorId,
+      verifiedAt: actorId ? new Date() : null,
+    };
+    switch (section) {
+      case 'asc':
+        await this.prisma.ascRecord.updateMany({ where, data });
+        break;
+      case 'students':
+        await this.prisma.studentRecord.updateMany({ where, data });
+        break;
+      case 'staff':
+        await this.prisma.staffRecord.updateMany({ where, data });
+        break;
+      case 'security':
+        await this.prisma.schoolSecurityProfile.updateMany({ where, data });
+        break;
+      case 'media':
+        await this.prisma.schoolMedia.updateMany({ where, data });
+        break;
+    }
   }
 
   private async locateSection(

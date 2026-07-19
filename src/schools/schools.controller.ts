@@ -18,6 +18,7 @@ import {
 } from '../common/roles.constants';
 import { SchoolsService } from './schools.service';
 import { SecurityAssessmentDto } from './dto/security-assessment.dto';
+import { CaptureGpsDto } from './dto/gps.dto';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('schools')
@@ -43,6 +44,17 @@ export class SchoolsController {
     @Query('periodId') periodId?: string,
   ) {
     return this.schoolsService.getDetail(req.user, id, periodId);
+  }
+
+  // Live GPS capture at the school gate (Field Capture Guide §1.4).
+  @Roles(...CAN_SUBMIT_INSPECTION)
+  @Put(':id/gps')
+  captureGps(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() dto: CaptureGpsDto,
+  ) {
+    return this.schoolsService.captureGps(req.user, id, dto);
   }
 
   // Save the security & vulnerability assessment as a draft (partial allowed).

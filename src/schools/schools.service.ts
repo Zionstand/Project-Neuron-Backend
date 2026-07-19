@@ -230,6 +230,42 @@ export class SchoolsService {
     return school;
   }
 
+  // Live GPS capture at the school gate (Field Capture Guide §1.4). Writes the
+  // averaged coordinate + capture-quality metadata onto the school master record.
+  // Re-capture clears any prior supervisor verification.
+  async captureGps(
+    user: RequestUser,
+    id: string,
+    dto: {
+      latitude: number;
+      longitude: number;
+      accuracyMetres?: number;
+      sampleCount?: number;
+    },
+  ) {
+    await this.requireScopedSchool(user, id);
+    return this.prisma.school.update({
+      where: { id },
+      data: {
+        latitude: dto.latitude,
+        longitude: dto.longitude,
+        gpsAccuracyMetres: dto.accuracyMetres ?? null,
+        gpsSampleCount: dto.sampleCount ?? null,
+        gpsCaptureTimestamp: new Date(),
+        gpsVerified: false,
+      },
+      select: {
+        id: true,
+        latitude: true,
+        longitude: true,
+        gpsAccuracyMetres: true,
+        gpsSampleCount: true,
+        gpsCaptureTimestamp: true,
+        gpsVerified: true,
+      },
+    });
+  }
+
   // Fields whose absence blocks submission (the rest stay optional per the
   // guide). Conditionals are checked separately.
   private static readonly REQUIRED_FOR_SUBMIT: Array<

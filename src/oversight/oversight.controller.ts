@@ -12,7 +12,7 @@ import { RolesGuard } from '../common/roles.guard';
 import { Roles } from '../common/roles.decorator';
 import { CAN_READ_INSPECTIONS, CAN_VIEW_RISK } from '../common/roles.constants';
 import { OversightService } from './oversight.service';
-import { SectionDto } from './dto/verify.dto';
+import { SectionDto, FlagMediaDto } from './dto/verify.dto';
 
 type SectionKey = 'asc' | 'students' | 'staff' | 'security' | 'media';
 
@@ -48,5 +48,16 @@ export class OversightController {
     @Body() dto: SectionDto,
   ) {
     return this.oversight.returnForRevision(req.user, id, dto.section as SectionKey);
+  }
+
+  // Supervisor flags a media file for review (or unflags with an empty reason).
+  @Post('schools/:id/media/:mediaId/flag')
+  flagMedia(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Param('mediaId') mediaId: string,
+    @Body() dto: FlagMediaDto,
+  ) {
+    return this.oversight.flagMedia(req.user, id, mediaId, dto.reason);
   }
 }

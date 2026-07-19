@@ -23,13 +23,19 @@ import {
 import { MediaService } from './media.service';
 import { MediaUploadDto, MediaMetaDto } from './dto/media.dto';
 
-// Images only (no video). Reject non-images early and cap size at 10 MB.
-const imageUpload = FileInterceptor('file', {
-  limits: { fileSize: 10 * 1024 * 1024 },
+// Accept images and video. Cap at 100 MB to accommodate short field clips; the
+// service branches on the mimetype for the correct Cloudinary resource type.
+const mediaUpload = FileInterceptor('file', {
+  limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) return cb(null, true);
+    if (
+      file.mimetype.startsWith('image/') ||
+      file.mimetype.startsWith('video/')
+    ) {
+      return cb(null, true);
+    }
     cb(
-      new BadRequestException('Only image files are accepted (no video).'),
+      new BadRequestException('Only image or video files are accepted.'),
       false,
     );
   },
@@ -48,7 +54,7 @@ export class MediaController {
 
   @Roles(...CAN_SUBMIT_INSPECTION)
   @Post()
-  @UseInterceptors(imageUpload)
+  @UseInterceptors(mediaUpload)
   upload(
     @Req() req: any,
     @Param('id') id: string,

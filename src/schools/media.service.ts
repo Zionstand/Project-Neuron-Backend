@@ -14,7 +14,48 @@ import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { CaptureStatus, CaptureSource } from '../generated/prisma/client';
 import { MediaUploadDto, MediaMetaDto } from './dto/media.dto';
 
-const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/heic'];
+const ALLOWED_IMAGE_MIME = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/heic',
+];
+const ALLOWED_VIDEO_MIME = [
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+  'video/3gpp',
+];
+
+// Best-effort GPS extraction from a Cloudinary image_metadata result. EXIF stores
+// GPS as strings/DMS; Cloudinary normalises common tags. Returns nulls if absent.
+function extractExifGps(result: any): {
+  lat: number | null;
+  lng: number | null;
+  takenAt: Date | null;
+} {
+  const meta = result?.image_metadata ?? {};
+  const num = (v: unknown) => {
+    const n = typeof v === 'string' ? parseFloat(v) : (v as number);
+    return Number.isFinite(n) ? (n as number) : null;
+  };
+  let lat = num(meta.GPSLatitude ?? meta.GPSLatitudeDecimal);
+  let lng = num(meta.GPSLongitude ?? meta.GPSLongitudeDecimal);
+  if (lat != null && /S/i.test(String(meta.GPSLatitudeRef ?? ''))) lat = -lat;
+  if (lng != null && /W/i.test(String(meta.GPSLongitudeRef ?? ''))) lng = -lng;
+  const rawDate = meta.DateTimeOriginal ?? meta.DateTime;
+  let takenAt: Date | null = null;
+  if (typeof rawDate === 'string') {
+    // EXIF "YYYY:MM:DD HH:MM:SS" → ISO.
+    const iso = rawDate.replace(
+      /^(\d{4}):(\d{2}):(\d{2})/,
+      '$1-$2-$3',
+    );
+    const d = new Date(iso);
+    if (!Number.isNaN(d.getTime())) takenAt = d;
+  }
+  return { lat, lng, takenAt };
+}
 
 // The current capture period, carrying its session.
 type Period = { id: string; sessionId: string };
@@ -54,9 +95,13 @@ export class MediaService {
 
   // Assets are private on Cloudinary; the delivery URL is signed on demand and
   // returned in `fileUrl`. Access control (requireScopedSchool) has already run
-  // by the time we sign. `fileUrl` is never persisted as a public URL.
-  private withSignedUrl<T extends { publicId: string }>(row: T): T {
-    return { ...row, fileUrl: this.cloudinary.signedUrl(row.publicId) };
+  // by the time we sign. `fileUrl` is never persisted as a public URL. Videos are
+  // signed with the video resource type.
+  private withSignedUrl<T extends { publicId: string; mediaType?: string }>(
+    row: T,
+  ): T {
+    const kind = row.mediaType === 'video' ? 'video' : 'image';
+    return { ...row, fileUrl: this.cloudinary.signedUrl(row.publicId, kind) };
   }
 
   async upload(
@@ -65,10 +110,12 @@ export class MediaService {
     file: Express.Multer.File | undefined,
     dto: MediaUploadDto,
   ) {
-    if (!file) throw new BadRequestException('An image file is required.');
-    if (!ALLOWED_MIME.includes(file.mimetype)) {
+    if (!file) throw new BadRequestException('A file is required.');
+    const isVideo = ALLOWED_VIDEO_MIME.includes(file.mimetype);
+    const isImage = ALLOWED_IMAGE_MIME.includes(file.mimetype);
+    if (!isImage && !isVideo) {
       throw new BadRequestException(
-        'Only image files (JPEG, PNG, WebP, HEIC) are accepted.',
+        'Only images (JPEG, PNG, WebP, HEIC) or video (MP4, WebM, MOV, 3GP) are accepted.',
       );
     }
     await this.schools.requireScopedSchool(user, schoolId);
@@ -82,10 +129,15 @@ export class MediaService {
       source,
     );
 
-    const result = await this.cloudinary.uploadImage(
-      file.buffer,
-      `neuron/schools/${schoolId}`,
-    );
+    const folder = `neuron/schools/${schoolId}`;
+    const result = isVideo
+      ? await this.cloudinary.uploadVideo(file.buffer, folder)
+      : await this.cloudinary.uploadImage(file.buffer, folder);
+
+    // Best-effort GPS/timestamp from photo EXIF (Field Capture Guide §6).
+    const exif = isVideo
+      ? { lat: null, lng: null, takenAt: null }
+      : extractExifGps(result);
 
     const makePrimary = dto.isPrimary === 'true';
     if (makePrimary) {
@@ -95,6 +147,10 @@ export class MediaService {
       });
     }
 
+    const mediaCategory = await this.prisma.mediaCategory.findUnique({
+      where: { code: dto.category },
+    });
+
     const row = await this.prisma.schoolMedia.create({
       data: {
         schoolId,
@@ -103,8 +159,9 @@ export class MediaService {
         source,
         uploadedById: user.id,
         category: dto.category,
+        mediaCategoryId: mediaCategory?.id ?? null,
         caption: dto.caption,
-        mediaType: 'image',
+        mediaType: isVideo ? 'video' : 'image',
         publicId: result.public_id,
         // Never persist the delivery URL — private assets are signed on demand.
         fileUrl: '',
@@ -113,6 +170,13 @@ export class MediaService {
         bytes: result.bytes ?? null,
         width: result.width ?? null,
         height: result.height ?? null,
+        videoDurationSecs:
+          isVideo && typeof result.duration === 'number'
+            ? Math.round(result.duration)
+            : null,
+        gpsLatitude: exif.lat,
+        gpsLongitude: exif.lng,
+        captureTimestamp: exif.takenAt,
         isPrimary: makePrimary,
       },
     });
@@ -140,10 +204,14 @@ export class MediaService {
       });
     }
 
+    const mediaCategory = await this.prisma.mediaCategory.findUnique({
+      where: { code: dto.category },
+    });
     const row = await this.prisma.schoolMedia.update({
       where: { id: mediaId },
       data: {
         category: dto.category,
+        mediaCategoryId: mediaCategory?.id ?? null,
         caption: dto.caption,
         isPrimary: dto.isPrimary === undefined ? existing.isPrimary : makePrimary,
       },
@@ -157,7 +225,10 @@ export class MediaService {
     const source = sourceForUser(user);
     const existing = await this.owned(mediaId, schoolId, period.id, source);
 
-    await this.cloudinary.deleteImage(existing.publicId);
+    await this.cloudinary.deleteImage(
+      existing.publicId,
+      existing.mediaType === 'video' ? 'video' : 'image',
+    );
     await this.prisma.schoolMedia.delete({ where: { id: mediaId } });
     await this.bump(schoolId, period, user.id, source);
     return { message: 'Image removed.' };

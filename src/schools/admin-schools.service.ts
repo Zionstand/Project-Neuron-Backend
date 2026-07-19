@@ -41,7 +41,7 @@ export class AdminSchoolsService {
 
   async create(dto: CreateSchoolDto) {
     try {
-      return await this.prisma.school.create({ data: this.toData(dto) });
+      return await this.prisma.school.create({ data: await this.toData(dto) });
     } catch (e: any) {
       if (e?.code === 'P2002')
         throw new ConflictException(
@@ -56,7 +56,7 @@ export class AdminSchoolsService {
     try {
       return await this.prisma.school.update({
         where: { id },
-        data: this.toPartialData(dto),
+        data: await this.toPartialData(dto),
       });
     } catch (e: any) {
       if (e?.code === 'P2002')
@@ -72,6 +72,11 @@ export class AdminSchoolsService {
     return this.prisma.school.update({ where: { id }, data: { isActive } });
   }
 
+  async setGpsVerified(id: string, gpsVerified: boolean) {
+    await this.require(id);
+    return this.prisma.school.update({ where: { id }, data: { gpsVerified } });
+  }
+
   // Upsert each row by code. Validation already ran (ValidateNested), so we only
   // need to split created vs updated.
   async import(dto: ImportSchoolsDto) {
@@ -85,11 +90,11 @@ export class AdminSchoolsService {
       if (existing) {
         await this.prisma.school.update({
           where: { code: row.code },
-          data: this.toData(row),
+          data: await this.toData(row),
         });
         updated++;
       } else {
-        await this.prisma.school.create({ data: this.toData(row) });
+        await this.prisma.school.create({ data: await this.toData(row) });
         created++;
       }
     }
@@ -102,7 +107,23 @@ export class AdminSchoolsService {
     return s;
   }
 
-  private toData(dto: CreateSchoolDto): Prisma.SchoolCreateInput {
+  // Resolve an LGA name to its normalized FK id + zone (id + name). Best-effort —
+  // returns nulls if the LGA isn't in the reference table.
+  private async resolveLga(lgaName?: string) {
+    if (!lgaName) return { lgaId: null, zoneId: null, zoneName: null as string | null };
+    const lga = await this.prisma.lga.findUnique({
+      where: { name: lgaName },
+      include: { zone: true },
+    });
+    return {
+      lgaId: lga?.id ?? null,
+      zoneId: lga?.zoneId ?? null,
+      zoneName: lga?.zone?.name ?? null,
+    };
+  }
+
+  private async toData(dto: CreateSchoolDto): Promise<Prisma.SchoolCreateInput> {
+    const geo = await this.resolveLga(dto.lgaName);
     return {
       code: dto.code,
       name: dto.name,
@@ -112,18 +133,24 @@ export class AdminSchoolsService {
       genderCategory: dto.genderCategory as GenderCategory,
       lgaName: dto.lgaName,
       lgaCode: dto.lgaCode ?? null,
-      zoneName: dto.zoneName ?? null,
+      // Prefer an explicit zone; otherwise derive from the LGA reference row.
+      zoneName: dto.zoneName ?? geo.zoneName,
+      lgaId: geo.lgaId,
+      zoneId: geo.zoneId,
       cluster: dto.cluster ?? null,
       ward: dto.ward ?? null,
       community: dto.community ?? null,
       address: dto.address ?? null,
       latitude: dto.latitude ?? null,
       longitude: dto.longitude ?? null,
+      dateEstablished: dto.dateEstablished ?? null,
       isActive: dto.isActive ?? true,
     };
   }
 
-  private toPartialData(dto: UpdateSchoolDto): Prisma.SchoolUpdateInput {
+  private async toPartialData(
+    dto: UpdateSchoolDto,
+  ): Promise<Prisma.SchoolUpdateInput> {
     const d: Prisma.SchoolUpdateInput = {};
     if (dto.code !== undefined) d.code = dto.code;
     if (dto.name !== undefined) d.name = dto.name;
@@ -132,7 +159,14 @@ export class AdminSchoolsService {
     if (dto.category !== undefined) d.category = dto.category as SchoolCategory;
     if (dto.genderCategory !== undefined)
       d.genderCategory = dto.genderCategory as GenderCategory;
-    if (dto.lgaName !== undefined) d.lgaName = dto.lgaName;
+    if (dto.lgaName !== undefined) {
+      d.lgaName = dto.lgaName;
+      // Re-derive the normalized LGA/zone FKs whenever the LGA changes.
+      const geo = await this.resolveLga(dto.lgaName);
+      d.lgaId = geo.lgaId;
+      d.zoneId = geo.zoneId;
+      if (dto.zoneName === undefined) d.zoneName = geo.zoneName;
+    }
     if (dto.lgaCode !== undefined) d.lgaCode = dto.lgaCode;
     if (dto.zoneName !== undefined) d.zoneName = dto.zoneName;
     if (dto.cluster !== undefined) d.cluster = dto.cluster;
@@ -141,6 +175,7 @@ export class AdminSchoolsService {
     if (dto.address !== undefined) d.address = dto.address;
     if (dto.latitude !== undefined) d.latitude = dto.latitude;
     if (dto.longitude !== undefined) d.longitude = dto.longitude;
+    if (dto.dateEstablished !== undefined) d.dateEstablished = dto.dateEstablished;
     if (dto.isActive !== undefined) d.isActive = dto.isActive;
     return d;
   }

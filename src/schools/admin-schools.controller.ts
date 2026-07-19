@@ -11,13 +11,17 @@ import {
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../common/roles.guard';
 import { Roles } from '../common/roles.decorator';
-import { CAN_MANAGE_REFERENCE_DATA } from '../common/roles.constants';
+import {
+  CAN_MANAGE_REFERENCE_DATA,
+  CAN_READ_INSPECTIONS,
+} from '../common/roles.constants';
 import { AdminSchoolsService } from './admin-schools.service';
 import {
   CreateSchoolDto,
   UpdateSchoolDto,
   SetActiveDto,
   ImportSchoolsDto,
+  GpsVerifyDto,
 } from './dto/admin-school.dto';
 
 // School registry administration (reference data, SYS_ADMIN). Separate path
@@ -56,5 +60,13 @@ export class AdminSchoolsController {
   @Patch(':id/active')
   setActive(@Param('id') id: string, @Body() dto: SetActiveDto) {
     return this.schools.setActive(id, dto.isActive);
+  }
+
+  // Supervisor sign-off on a captured GPS location (Field Capture Guide §1.4).
+  // Overrides the class role gate — verifiers, not just SYS_ADMIN.
+  @Roles(...CAN_READ_INSPECTIONS)
+  @Patch(':id/gps-verify')
+  gpsVerify(@Param('id') id: string, @Body() dto: GpsVerifyDto) {
+    return this.schools.setGpsVerified(id, dto.gpsVerified);
   }
 }
