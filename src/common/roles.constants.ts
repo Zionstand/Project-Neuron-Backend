@@ -19,7 +19,7 @@ export const ALL_ROLES = [
 
 export const ADMIN_ROLES = ['SYS_ADMIN'];
 
-// ─── Module 1 — Vulnerability Assessment ────────────────────────────────────
+// ─── Module 1 — School Inspection ────────────────────────────────────
 // POST /inspections — LIE/INSPECT are LGA/cluster-scoped at the service layer.
 // PRINCIPAL is single-school-scoped and writes a separate PRINCIPAL-source record.
 export const CAN_SUBMIT_INSPECTION = [

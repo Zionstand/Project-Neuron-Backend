@@ -57,7 +57,7 @@ export class SchoolsController {
     return this.schoolsService.captureGps(req.user, id, dto);
   }
 
-  // Save the security & vulnerability assessment as a draft (partial allowed).
+  // Save the security & School Inspection as a draft (partial allowed).
   @Roles(...CAN_SUBMIT_INSPECTION)
   @Put(':id/security')
   saveSecurity(
