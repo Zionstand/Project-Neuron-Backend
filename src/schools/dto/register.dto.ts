@@ -109,8 +109,22 @@ export const NIGERIAN_STATES = [
 
 const inList = (arr: readonly string[]) => arr as unknown as string[];
 
+// Idempotency key minted on the device before a row is first sent, so replaying
+// a queued offline batch upserts rather than duplicates. Optional: rows captured
+// online don't need one. Not @IsUUID — the client falls back to a timestamp-based
+// id when crypto.randomUUID is unavailable on older field devices.
+const ClientId = () =>
+  function (target: object, key: string) {
+    IsOptional()(target, key);
+    IsString()(target, key);
+    IsNotEmpty()(target, key);
+    MaxLength(64)(target, key);
+  };
+
 // ─── Annual School Census ─────────────────────────────────────────────────────
 export class AscRecordDto {
+  @ClientId() clientId?: string;
+
   @IsIn(inList(CLASS_LEVELS)) classLevel: string;
   @IsIn(inList(GENDERS)) gender: string;
 
@@ -122,6 +136,8 @@ export class AscRecordDto {
 
 // ─── Student register ─────────────────────────────────────────────────────────
 export class StudentRecordDto {
+  @ClientId() clientId?: string;
+
   @IsString() @IsNotEmpty() @MaxLength(60) studentCode: string;
   @IsIn(inList(CLASS_LEVELS)) classLevel: string;
   @IsString() @IsNotEmpty() @MaxLength(80) firstName: string;
@@ -148,6 +164,8 @@ export class StudentRecordDto {
 
 // ─── Staff register ───────────────────────────────────────────────────────────
 export class StaffRecordDto {
+  @ClientId() clientId?: string;
+
   @IsString() @IsNotEmpty() @MaxLength(60) staffCode: string;
   @IsString() @IsNotEmpty() @MaxLength(80) firstName: string;
   @IsOptional() @IsString() @MaxLength(80) middleName?: string;

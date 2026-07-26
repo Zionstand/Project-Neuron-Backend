@@ -122,39 +122,45 @@ export class RegistersService {
     };
   }
 
-  async createAsc(user: RequestUser, schoolId: string, dto: AscRecordDto) {
-    if (dto.newEntrants > dto.enrolmentCount) {
-      throw new BadRequestException(
-        'New entrants cannot exceed the enrolment count.',
-      );
+  // One or more census rows. The section status is recomputed once at the end
+  // rather than per row — see `createMany` for the batch semantics.
+  async createAsc(user: RequestUser, schoolId: string, dtos: AscRecordDto[]) {
+    for (const dto of dtos) {
+      if (dto.newEntrants > dto.enrolmentCount) {
+        throw new BadRequestException(
+          'New entrants cannot exceed the enrolment count.',
+        );
+      }
     }
     const period = await this.prepare(user, schoolId);
     const source = sourceForUser(user);
     try {
-      const row = await this.prisma.ascRecord.create({
-        data: {
-          schoolId,
-          sessionId: period.sessionId,
-          periodId: period.id,
-          source,
-          collectedById: user.id,
-          classLevel: dto.classLevel,
-          classLevelId: await this.classLevelId(dto.classLevel),
-          gender: dto.gender as Gender,
-          enrolmentCount: dto.enrolmentCount,
-          newEntrants: dto.newEntrants,
-          repeaters: dto.repeaters,
-          dropoutCount: dto.dropoutCount,
-        },
-      });
-      await this.bumpAsc(schoolId, period, user.id, source);
-      return row;
-    } catch (e: any) {
-      if (e?.code === 'P2002')
-        throw this.duplicate(
+      return await this.createMany(dtos, (dto) =>
+        this.writeRow(
+          'ascRecord',
+          { schoolId, periodId: period.id, source, clientId: dto.clientId },
+          async () => ({
+            schoolId,
+            sessionId: period.sessionId,
+            periodId: period.id,
+            source,
+            collectedById: user.id,
+            clientId: dto.clientId ?? null,
+            classLevel: dto.classLevel,
+            classLevelId: await this.classLevelId(dto.classLevel),
+            gender: dto.gender as Gender,
+            enrolmentCount: dto.enrolmentCount,
+            newEntrants: dto.newEntrants,
+            repeaters: dto.repeaters,
+            dropoutCount: dto.dropoutCount,
+          }),
           `${dto.classLevel} ${dto.gender} has already been recorded for this school.`,
-        );
-      throw e;
+        ),
+      );
+    } finally {
+      // Runs even when a mid-batch row fails, so the section status reflects the
+      // rows that did land.
+      await this.bumpAsc(schoolId, period, user.id, source);
     }
   }
 
@@ -277,30 +283,30 @@ export class RegistersService {
   async createStudent(
     user: RequestUser,
     schoolId: string,
-    dto: StudentRecordDto,
+    dtos: StudentRecordDto[],
   ) {
     const period = await this.prepare(user, schoolId);
     const source = sourceForUser(user);
     try {
-      const row = await this.prisma.studentRecord.create({
-        data: {
-          schoolId,
-          sessionId: period.sessionId,
-          periodId: period.id,
-          source,
-          collectedById: user.id,
-          classLevelId: await this.classLevelId(dto.classLevel),
-          ...this.studentData(dto),
-        },
-      });
-      await this.bumpStudents(schoolId, period, user.id, source);
-      return row;
-    } catch (e: any) {
-      if (e?.code === 'P2002')
-        throw this.duplicate(
+      return await this.createMany(dtos, (dto) =>
+        this.writeRow(
+          'studentRecord',
+          { schoolId, periodId: period.id, source, clientId: dto.clientId },
+          async () => ({
+            schoolId,
+            sessionId: period.sessionId,
+            periodId: period.id,
+            source,
+            collectedById: user.id,
+            clientId: dto.clientId ?? null,
+            classLevelId: await this.classLevelId(dto.classLevel),
+            ...this.studentData(dto),
+          }),
           `A student with code "${dto.studentCode}" already exists for this school.`,
-        );
-      throw e;
+        ),
+      );
+    } finally {
+      await this.bumpStudents(schoolId, period, user.id, source);
     }
   }
 
@@ -429,36 +435,47 @@ export class RegistersService {
     };
   }
 
-  async createStaff(user: RequestUser, schoolId: string, dto: StaffRecordDto) {
+  async createStaff(user: RequestUser, schoolId: string, dtos: StaffRecordDto[]) {
     const period = await this.prepare(user, schoolId);
     const source = sourceForUser(user);
-    await this.assertSingleHeadTeacher(
-      schoolId,
-      period.id,
-      source,
-      dto.isHeadTeacher,
-    );
     try {
-      const row = await this.prisma.staffRecord.create({
-        data: {
+      return await this.createMany(dtos, async (dto) => {
+        // On a replay the row being written may itself be the head teacher on
+        // record, so exclude it — otherwise resending a batch conflicts with the
+        // row it is meant to update.
+        const existingId = await this.rowIdForClientId(
+          'staffRecord',
           schoolId,
-          sessionId: period.sessionId,
-          periodId: period.id,
+          period.id,
           source,
-          collectedById: user.id,
-          qualId: await this.qualId(dto.qualification),
-          subjectId: await this.subjectId(dto.subject),
-          ...this.staffData(dto),
-        },
-      });
-      await this.bumpStaff(schoolId, period, user.id, source);
-      return row;
-    } catch (e: any) {
-      if (e?.code === 'P2002')
-        throw this.duplicate(
+          dto.clientId,
+        );
+        await this.assertSingleHeadTeacher(
+          schoolId,
+          period.id,
+          source,
+          dto.isHeadTeacher,
+          existingId,
+        );
+        return this.writeRow(
+          'staffRecord',
+          { schoolId, periodId: period.id, source, clientId: dto.clientId },
+          async () => ({
+            schoolId,
+            sessionId: period.sessionId,
+            periodId: period.id,
+            source,
+            collectedById: user.id,
+            clientId: dto.clientId ?? null,
+            qualId: await this.qualId(dto.qualification),
+            subjectId: await this.subjectId(dto.subject),
+            ...this.staffData(dto),
+          }),
           `A staff member with code "${dto.staffCode}" already exists for this school.`,
         );
-      throw e;
+      });
+    } finally {
+      await this.bumpStaff(schoolId, period, user.id, source);
     }
   }
 
@@ -601,6 +618,86 @@ export class RegistersService {
   }
 
   // ─── Shared helpers ──────────────────────────────────────────────────────────
+
+  // Apply a batch of captured rows in order.
+  //
+  // Deliberately NOT one transaction: a single bad row shouldn't discard the good
+  // rows before it, because the device that sent them may not get another window
+  // of connectivity soon. The contract that makes this safe is `clientId` — the
+  // client can resend the entire batch and rows that already landed are updated
+  // in place rather than duplicated, so a partial success plus a retry converges
+  // on the same result as one clean run.
+  private async createMany<D, R>(
+    dtos: D[],
+    write: (dto: D) => Promise<R>,
+  ): Promise<R[]> {
+    const rows: R[] = [];
+    for (const dto of dtos) rows.push(await write(dto));
+    return rows;
+  }
+
+  // Create the row — or update it in place when the device supplied a `clientId`
+  // it has sent before. Without a clientId there is nothing to match on, so this
+  // is a plain create (the behaviour every online caller had before batching).
+  private async writeRow<R>(
+    model: 'ascRecord' | 'studentRecord' | 'staffRecord',
+    key: {
+      schoolId: string;
+      periodId: string;
+      source: CaptureSource;
+      clientId?: string;
+    },
+    buildData: () => Promise<Record<string, unknown>>,
+    duplicateMessage: string,
+  ): Promise<R> {
+    const data = await buildData();
+    const delegate = this.prisma[model] as any;
+    try {
+      if (!key.clientId) return await delegate.create({ data });
+      const { schoolId, periodId, source, clientId } = key;
+      return await delegate.upsert({
+        where: {
+          schoolId_periodId_source_clientId: {
+            schoolId,
+            periodId,
+            source,
+            clientId,
+          },
+        },
+        create: data,
+        update: data,
+      });
+    } catch (e: any) {
+      // A clientId collision can't land here (that path upserts); a P2002 means
+      // the row's natural key — class+gender, student code, staff code — is
+      // already taken by a different record.
+      if (e?.code === 'P2002') throw this.duplicate(duplicateMessage);
+      throw e;
+    }
+  }
+
+  // The id of the row a clientId already maps to, if any.
+  private async rowIdForClientId(
+    model: 'ascRecord' | 'studentRecord' | 'staffRecord',
+    schoolId: string,
+    periodId: string,
+    source: CaptureSource,
+    clientId?: string,
+  ): Promise<string | undefined> {
+    if (!clientId) return undefined;
+    const row = await (this.prisma[model] as any).findUnique({
+      where: {
+        schoolId_periodId_source_clientId: {
+          schoolId,
+          periodId,
+          source,
+          clientId,
+        },
+      },
+      select: { id: true },
+    });
+    return row?.id;
+  }
 
   // Confirm a row belongs to this school + current PERIOD + capture channel before
   // mutating it (so a principal can't edit an inspector's row, or a closed period's).

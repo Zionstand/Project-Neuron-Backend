@@ -17,6 +17,7 @@ import {
   CAN_SUBMIT_INSPECTION,
 } from '../common/roles.constants';
 import { RegistersService } from './registers.service';
+import { BatchBodyPipe, type BatchBody } from '../common/batch-body.pipe';
 import {
   AscRecordDto,
   StudentRecordDto,
@@ -25,6 +26,10 @@ import {
 
 // Register-type capture endpoints, nested under a school. Coarse role gate here;
 // LGA/zone scoping is enforced in the service (RBAC Rule 3).
+//
+// Each POST takes either one record or an array of them, so a device draining an
+// offline queue makes one request instead of one per row. The response mirrors
+// the request shape: an object in, an object out; an array in, an array out.
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('schools/:id')
 export class RegistersController {
@@ -39,8 +44,13 @@ export class RegistersController {
 
   @Roles(...CAN_SUBMIT_INSPECTION)
   @Post('asc')
-  createAsc(@Req() req: any, @Param('id') id: string, @Body() dto: AscRecordDto) {
-    return this.registers.createAsc(req.user, id, dto);
+  async createAsc(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body(new BatchBodyPipe(AscRecordDto)) body: BatchBody<AscRecordDto>,
+  ) {
+    const rows = await this.registers.createAsc(req.user, id, body.items);
+    return body.single ? rows[0] : rows;
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
@@ -79,12 +89,13 @@ export class RegistersController {
 
   @Roles(...CAN_SUBMIT_INSPECTION)
   @Post('students')
-  createStudent(
+  async createStudent(
     @Req() req: any,
     @Param('id') id: string,
-    @Body() dto: StudentRecordDto,
+    @Body(new BatchBodyPipe(StudentRecordDto)) body: BatchBody<StudentRecordDto>,
   ) {
-    return this.registers.createStudent(req.user, id, dto);
+    const rows = await this.registers.createStudent(req.user, id, body.items);
+    return body.single ? rows[0] : rows;
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
@@ -123,12 +134,13 @@ export class RegistersController {
 
   @Roles(...CAN_SUBMIT_INSPECTION)
   @Post('staff')
-  createStaff(
+  async createStaff(
     @Req() req: any,
     @Param('id') id: string,
-    @Body() dto: StaffRecordDto,
+    @Body(new BatchBodyPipe(StaffRecordDto)) body: BatchBody<StaffRecordDto>,
   ) {
-    return this.registers.createStaff(req.user, id, dto);
+    const rows = await this.registers.createStaff(req.user, id, body.items);
+    return body.single ? rows[0] : rows;
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)

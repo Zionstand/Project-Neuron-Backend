@@ -470,6 +470,11 @@ model AscRecord {
   collectedById String?
   source        CaptureSource @default(INSPECTOR)
 
+  // Idempotency key minted on the device before the row is first sent. Lets an
+  // offline batch be replayed safely: a resend upserts its own row instead of
+  // creating a duplicate. Null for rows created online before this existed.
+  clientId String?
+
   classLevel     String // Pry1 … SSS3 (kept for display / unique key)
   classLevelId   String? // FK → ClassLevel (normalized, set on save)
   gender         Gender
@@ -486,6 +491,8 @@ model AscRecord {
   updatedAt DateTime @updatedAt
 
   @@unique([schoolId, periodId, source, classLevel, gender])
+  // Postgres treats NULLs as distinct, so pre-existing rows don't collide.
+  @@unique([schoolId, periodId, source, clientId])
   @@index([schoolId, periodId])
 }
 
@@ -498,6 +505,9 @@ model StudentRecord {
   periodId      String
   collectedById String?
   source        CaptureSource @default(INSPECTOR)
+
+  // See AscRecord.clientId — offline batch idempotency key.
+  clientId String?
 
   studentCode  String
   classLevel   String
@@ -530,6 +540,7 @@ model StudentRecord {
   updatedAt DateTime @updatedAt
 
   @@unique([schoolId, periodId, source, studentCode])
+  @@unique([schoolId, periodId, source, clientId])
   @@index([schoolId, periodId])
 }
 
@@ -542,6 +553,9 @@ model StaffRecord {
   periodId      String
   collectedById String?
   source        CaptureSource @default(INSPECTOR)
+
+  // See AscRecord.clientId — offline batch idempotency key.
+  clientId String?
 
   staffCode   String
   firstName   String
@@ -571,6 +585,7 @@ model StaffRecord {
   updatedAt DateTime @updatedAt
 
   @@unique([schoolId, periodId, source, staffCode])
+  @@unique([schoolId, periodId, source, clientId])
   @@index([schoolId, periodId])
 }
 
@@ -585,6 +600,10 @@ model SchoolMedia {
   periodId       String
   uploadedById   String?
   source         CaptureSource @default(INSPECTOR)
+
+  // See AscRecord.clientId. Matters more here than on the registers: without it
+  // a replayed upload would push a SECOND copy of the same photo to Cloudinary.
+  clientId String?
 
   category         String // Module A | Module B | Module C | Module D | General
   mediaCategoryId  String? // FK → MediaCategory (normalized, set on save)
@@ -615,6 +634,7 @@ model SchoolMedia {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([schoolId, periodId, source, clientId])
   @@index([schoolId, sessionId])
   @@index([schoolId, periodId])
 }

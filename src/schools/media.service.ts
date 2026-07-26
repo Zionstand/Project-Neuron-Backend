@@ -129,6 +129,23 @@ export class MediaService {
       source,
     );
 
+    // A queued offline upload can be replayed after its response was lost on a
+    // flaky link. Check BEFORE sending the bytes: returning the existing row
+    // here is what stops a duplicate asset (and a duplicate transfer over 3G).
+    if (dto.clientId) {
+      const already = await this.prisma.schoolMedia.findUnique({
+        where: {
+          schoolId_periodId_source_clientId: {
+            schoolId,
+            periodId: period.id,
+            source,
+            clientId: dto.clientId,
+          },
+        },
+      });
+      if (already) return this.withSignedUrl(already);
+    }
+
     const folder = `neuron/schools/${schoolId}`;
     const result = isVideo
       ? await this.cloudinary.uploadVideo(file.buffer, folder)
@@ -151,35 +168,60 @@ export class MediaService {
       where: { code: dto.category },
     });
 
-    const row = await this.prisma.schoolMedia.create({
-      data: {
-        schoolId,
-        sessionId: period.sessionId,
-        periodId: period.id,
-        source,
-        uploadedById: user.id,
-        category: dto.category,
-        mediaCategoryId: mediaCategory?.id ?? null,
-        caption: dto.caption,
-        mediaType: isVideo ? 'video' : 'image',
-        publicId: result.public_id,
-        // Never persist the delivery URL — private assets are signed on demand.
-        fileUrl: '',
-        originalFileName: file.originalname ?? null,
-        format: result.format ?? null,
-        bytes: result.bytes ?? null,
-        width: result.width ?? null,
-        height: result.height ?? null,
-        videoDurationSecs:
-          isVideo && typeof result.duration === 'number'
-            ? Math.round(result.duration)
-            : null,
-        gpsLatitude: exif.lat,
-        gpsLongitude: exif.lng,
-        captureTimestamp: exif.takenAt,
-        isPrimary: makePrimary,
-      },
-    });
+    let row;
+    try {
+      row = await this.prisma.schoolMedia.create({
+        data: {
+          schoolId,
+          sessionId: period.sessionId,
+          periodId: period.id,
+          source,
+          uploadedById: user.id,
+          clientId: dto.clientId ?? null,
+          category: dto.category,
+          mediaCategoryId: mediaCategory?.id ?? null,
+          caption: dto.caption,
+          mediaType: isVideo ? 'video' : 'image',
+          publicId: result.public_id,
+          // Never persist the delivery URL — private assets are signed on demand.
+          fileUrl: '',
+          originalFileName: file.originalname ?? null,
+          format: result.format ?? null,
+          bytes: result.bytes ?? null,
+          width: result.width ?? null,
+          height: result.height ?? null,
+          videoDurationSecs:
+            isVideo && typeof result.duration === 'number'
+              ? Math.round(result.duration)
+              : null,
+          gpsLatitude: exif.lat,
+          gpsLongitude: exif.lng,
+          captureTimestamp: exif.takenAt,
+          isPrimary: makePrimary,
+        },
+      });
+    } catch (e: any) {
+      // Two replays of the same queued upload can both clear the pre-check and
+      // both push to Cloudinary. The loser deletes the asset it just created so
+      // no orphan is left behind, then returns the row that won.
+      if (e?.code === 'P2002' && dto.clientId) {
+        await this.cloudinary
+          .deleteImage(result.public_id, isVideo ? 'video' : 'image')
+          .catch(() => undefined);
+        const winner = await this.prisma.schoolMedia.findUnique({
+          where: {
+            schoolId_periodId_source_clientId: {
+              schoolId,
+              periodId: period.id,
+              source,
+              clientId: dto.clientId,
+            },
+          },
+        });
+        if (winner) return this.withSignedUrl(winner);
+      }
+      throw e;
+    }
 
     await this.bump(schoolId, period, user.id, source);
     return this.withSignedUrl(row);

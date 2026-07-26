@@ -19,6 +19,11 @@ export class MediaUploadDto {
   @IsString() @IsNotEmpty() @MaxLength(500) caption: string;
 
   @IsOptional() @IsString() isPrimary?: string;
+
+  // Idempotency key minted on the device when the photo was taken. A media
+  // upload queued offline may be retried after the response was lost; without
+  // this, the retry would store a second copy of the same file in Cloudinary.
+  @IsOptional() @IsString() @IsNotEmpty() @MaxLength(64) clientId?: string;
 }
 
 // Editing an existing media row's metadata (no re-upload).
