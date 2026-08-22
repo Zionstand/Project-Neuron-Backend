@@ -6,7 +6,13 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { SessionsService } from '../sessions/sessions.service';
 import type { Prisma } from '../generated/prisma/client';
-import { CaptureStatus, CaptureSource } from '../generated/prisma/client';
+import {
+  CaptureStatus,
+  CaptureSource,
+  SchoolOwnership,
+  SchoolCategory,
+  GenderCategory,
+} from '../generated/prisma/client';
 import { SecurityAssessmentDto } from './dto/security-assessment.dto';
 import { computeRiskScores } from './risk-score';
 
@@ -271,6 +277,9 @@ export class SchoolsService {
   private static readonly REQUIRED_FOR_SUBMIT: Array<
     keyof SecurityAssessmentDto
   > = [
+    'ownership',
+    'schoolCategory',
+    'genderCategory',
     'roadSurfaceType',
     'forestProximity',
     'perimeterFenceStatus',
@@ -467,8 +476,50 @@ export class SchoolsService {
       },
     });
 
+    await this.syncSchoolProfileFromCapture(id, effective, source);
+
     await this.setSectionStatus(visit.id, 'securityStatus', CaptureStatus.SUBMITTED);
     return this.getDetail(user, id);
+  }
+
+  // Module A0 write-back: the field officer is the only person who can observe
+  // ownership / boarding status / gender category, so a submitted assessment
+  // heals the School master record. Only ever writes a confirmed value that
+  // actually differs — never blanks an existing one.
+  //
+  // INSPECTOR submissions only. A principal's self-service answer is still
+  // captured on their own PRINCIPAL-source profile row (and shows up in the
+  // inspector-vs-principal comparison), but self-reported data must not
+  // silently rewrite the official registry.
+  private async syncSchoolProfileFromCapture(
+    schoolId: string,
+    values: Record<string, unknown>,
+    source: CaptureSource,
+  ) {
+    if (source !== CaptureSource.INSPECTOR) return;
+
+    const school = await this.prisma.school.findUnique({
+      where: { id: schoolId },
+      select: { ownership: true, category: true, genderCategory: true },
+    });
+    if (!school) return;
+
+    // Confirmed = a non-empty string. Blank/absent means the officer didn't
+    // answer, which must never overwrite what the registry already holds.
+    const confirmed = (v: unknown, current: string): string | null =>
+      typeof v === 'string' && v !== '' && v !== current ? v : null;
+
+    const data: Prisma.SchoolUpdateInput = {};
+    const ownership = confirmed(values.ownership, school.ownership);
+    const category = confirmed(values.schoolCategory, school.category);
+    const gender = confirmed(values.genderCategory, school.genderCategory);
+
+    if (ownership) data.ownership = ownership as SchoolOwnership;
+    if (category) data.category = category as SchoolCategory;
+    if (gender) data.genderCategory = gender as GenderCategory;
+
+    if (Object.keys(data).length === 0) return;
+    await this.prisma.school.update({ where: { id: schoolId }, data });
   }
 
   private assertSubmittable(values: Record<string, unknown>) {

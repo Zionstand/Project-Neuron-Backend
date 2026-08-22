@@ -9,6 +9,11 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { OWNERSHIPS, CATEGORIES, GENDER_CATEGORIES } from './admin-school.dto';
+
+// Module A0 reuses the School master option sets verbatim — same codes, so a
+// confirmed answer can be written straight back onto the School record.
+export { OWNERSHIPS, CATEGORIES, GENDER_CATEGORIES };
 
 // Fixed option sets from the Field Capture Guide §5. Exported so the service can
 // reuse them and the frontend stays in sync with one source of truth.
@@ -54,6 +59,16 @@ export const INCIDENT_TYPES = [
 // Every field is optional so a partial draft can be saved. The submit endpoint
 // enforces the required core (see SchoolsService.REQUIRED_FOR_SUBMIT).
 export class SecurityAssessmentDto {
+  // Module A0 — School Profile Confirmation
+  @IsOptional() @IsIn(OWNERSHIPS as unknown as string[])
+  ownership?: string;
+
+  @IsOptional() @IsIn(CATEGORIES as unknown as string[])
+  schoolCategory?: string;
+
+  @IsOptional() @IsIn(GENDER_CATEGORIES as unknown as string[])
+  genderCategory?: string;
+
   // Module A — Location & Access
   @IsOptional() @IsNumber() @Min(0) @Max(500)
   distanceToMajorRoadKm?: number;

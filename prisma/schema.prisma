@@ -372,6 +372,15 @@ model SchoolSecurityProfile {
 
   source CaptureSource @default(INSPECTOR)
 
+  // Module A0 — School Profile Confirmation. These three attributes live on the
+  // School master record but are only observable at the school, so the field
+  // officer confirms them here. Stored as the SchoolOwnership / SchoolCategory /
+  // GenderCategory enum CODES (string-typed, per this model's convention) so the
+  // submit handler can write them straight back onto School.
+  ownership      String? // PUBLIC | MISSION | PRIVATE
+  schoolCategory String? // DAY | BOARDING | SEMI_BOARDING
+  genderCategory String? // MIXED | BOYS_ONLY | GIRLS_ONLY
+
   // Module A — Location & Access
   distanceToMajorRoadKm    Float?
   roadSurfaceType          String? // Tarmac | Laterite | Gravel | Footpath Only | None
