@@ -1,9 +1,14 @@
-import { Controller, Post, Patch, Body, HttpCode, HttpStatus, Get, UseGuards, Req, Res } from '@nestjs/common';
+import { Controller, Post, Patch, Body, HttpCode, HttpStatus, Get, UseGuards, Req, Res, ForbiddenException } from '@nestjs/common';
+import {
+  isPrincipalPasswordChangeLocked,
+  PASSWORD_LOCKED_MESSAGE,
+} from '../common/capture-scope';
 import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto'; 
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto'; 
@@ -67,6 +72,11 @@ export class AuthController {
   @Patch('change-password')
   @HttpCode(HttpStatus.OK)
   changePassword(@Req() req: any, @Body() body: { currentPassword: string; newPassword: string }) {
+    // Principals share one pilot password published on a credentials sheet; a
+    // change here would invalidate a row of it with nothing to indicate which.
+    if (req.user?.role === 'PRINCIPAL' && isPrincipalPasswordChangeLocked()) {
+      throw new ForbiddenException(PASSWORD_LOCKED_MESSAGE);
+    }
     return this.authService.changePassword(req.user.id, body.currentPassword, body.newPassword);
   }
 
@@ -74,6 +84,13 @@ export class AuthController {
   @Get('me')
   getMe(@Req() req: any) {
     return this.authService.getMe(req.user.id);
+  }
+
+  // Self-service profile edit (name / phone only).
+  @UseGuards(JwtAuthGuard)
+  @Patch('me')
+  updateProfile(@Req() req: any, @Body() dto: UpdateProfileDto) {
+    return this.authService.updateProfile(req.user.id, dto);
   }
 
   @UseGuards(JwtAuthGuard)

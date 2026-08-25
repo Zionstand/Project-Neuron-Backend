@@ -1,5 +1,6 @@
 import {
   IsBoolean,
+  IsDateString,
   IsIn,
   IsInt,
   IsNumber,
@@ -22,6 +23,16 @@ export const ROAD_SURFACE_TYPES = [
   'Laterite',
   'Gravel',
   'Footpath Only',
+  'None',
+] as const;
+// Condition of the access road, distinct from its material. Captured because
+// trafficability — not surface type — is what governs emergency response time.
+export const ROAD_CONDITIONS = ['Good', 'Fair', 'Poor'] as const;
+export const WATER_SOURCES = [
+  'Piped',
+  'Borehole',
+  'Well',
+  'Rain Water',
   'None',
 ] as const;
 export const FOREST_PROXIMITIES = [
@@ -76,6 +87,9 @@ export class SecurityAssessmentDto {
   @IsOptional() @IsIn(ROAD_SURFACE_TYPES as unknown as string[])
   roadSurfaceType?: string;
 
+  @IsOptional() @IsIn(ROAD_CONDITIONS as unknown as string[])
+  roadCondition?: string;
+
   @IsOptional() @IsInt() @Min(0) @Max(1440)
   estimatedTravelTimeMins?: number;
 
@@ -103,6 +117,10 @@ export class SecurityAssessmentDto {
   @IsOptional() @IsBoolean() hasElectricity?: boolean;
   @IsOptional() @IsBoolean() hasSolar?: boolean;
   @IsOptional() @IsBoolean() hasExternalLighting?: boolean;
+  @IsOptional() @IsBoolean() hasHealthFacility?: boolean;
+
+  @IsOptional() @IsIn(WATER_SOURCES as unknown as string[])
+  waterSource?: string;
 
   // Module C — Communication & Emergency Capacity
   @IsOptional() @IsBoolean() hasPhoneNetwork?: boolean;
@@ -123,6 +141,8 @@ export class SecurityAssessmentDto {
   @IsOptional() @IsString() @MaxLength(120)
   nearestSecurityPostName?: string;
 
+  @IsOptional() @IsBoolean() hasSecurityGuard?: boolean;
+
   // Module D — Incident History
   @IsOptional() @IsBoolean() hadSecurityIncident?: boolean;
 
@@ -136,4 +156,12 @@ export class SecurityAssessmentDto {
   mostRecentIncidentType?: string;
 
   @IsOptional() @IsBoolean() incidentReportedToAuth?: boolean;
+
+  // Inspection cadence. Asked of every school — unlike the incident detail
+  // above, these are not conditional on an incident having occurred.
+  @IsOptional() @IsDateString()
+  lastInspectionDate?: string;
+
+  @IsOptional() @IsInt() @Min(0) @Max(365)
+  inspectionVisitsLastYear?: number;
 }

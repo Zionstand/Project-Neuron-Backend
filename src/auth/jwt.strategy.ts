@@ -9,6 +9,7 @@ import type { Request } from 'express';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { AccountStatus } from '../generated/prisma/client';
+import { accountBlockedPayload } from '../common/account-status';
 
 // RBAC Rule 7: the JWT is read from the httpOnly cookie ONLY — never from the
 // Authorization header, never from localStorage. cookie-parser populates req.cookies.
@@ -36,17 +37,18 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     if (!user) throw new UnauthorizedException('User no longer exists');
 
-    if (user.accountStatus === AccountStatus.PENDING) {
-      throw new ForbiddenException(
-        'Your account is pending admin approval. You cannot perform actions yet.',
-      );
+    // Status is re-read from the database on EVERY request, so an administrator
+    // suspending, banning or deactivating someone takes effect on their very next
+    // action — an already-issued token buys them nothing. The payload carries the
+    // ACCOUNT_BLOCKED code the client uses to tear the session down and redirect.
+    if (user.isDeleted) {
+      throw new UnauthorizedException('User no longer exists');
     }
 
-    if (
-      user.accountStatus === AccountStatus.SUSPENDED ||
-      user.accountStatus === AccountStatus.BANNED
-    ) {
-      throw new ForbiddenException('Your account has been suspended or banned.');
+    if (user.accountStatus !== AccountStatus.ACTIVE) {
+      throw new ForbiddenException(
+        accountBlockedPayload(user.accountStatus, user.accountStatusReason),
+      );
     }
 
     // What lands on request.user. `sub` is exposed for the media ownership check

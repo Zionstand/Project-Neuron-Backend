@@ -12,6 +12,8 @@ import {
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../common/roles.guard';
 import { Roles } from '../common/roles.decorator';
+import { CaptureScopeGuard } from '../common/capture-scope.guard';
+import { CaptureSection } from '../common/capture-scope.decorator';
 import {
   CAN_READ_SCHOOL_REGISTRY,
   CAN_SUBMIT_INSPECTION,
@@ -30,19 +32,24 @@ import {
 // Each POST takes either one record or an array of them, so a device draining an
 // offline queue makes one request instead of one per row. The response mirrors
 // the request shape: an object in, an object out; an array in, an array out.
-@UseGuards(JwtAuthGuard, RolesGuard)
+//
+// Every route also carries a @CaptureSection tag so CaptureScopeGuard can refuse
+// it while that section is switched off for the current exercise.
+@UseGuards(JwtAuthGuard, RolesGuard, CaptureScopeGuard)
 @Controller('schools/:id')
 export class RegistersController {
   constructor(private readonly registers: RegistersService) {}
 
   // ─── Annual School Census ───────────────────────────────────────────────────
   @Roles(...CAN_READ_SCHOOL_REGISTRY)
+  @CaptureSection('asc')
   @Get('asc')
   listAsc(@Req() req: any, @Param('id') id: string) {
     return this.registers.listAsc(req.user, id);
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('asc')
   @Post('asc')
   async createAsc(
     @Req() req: any,
@@ -54,12 +61,14 @@ export class RegistersController {
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('asc')
   @Post('asc/submit')
   submitAsc(@Req() req: any, @Param('id') id: string) {
     return this.registers.submitAsc(req.user, id);
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('asc')
   @Put('asc/:rowId')
   updateAsc(
     @Req() req: any,
@@ -71,6 +80,7 @@ export class RegistersController {
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('asc')
   @Delete('asc/:rowId')
   removeAsc(
     @Req() req: any,
@@ -82,12 +92,14 @@ export class RegistersController {
 
   // ─── Students ────────────────────────────────────────────────────────────────
   @Roles(...CAN_READ_SCHOOL_REGISTRY)
+  @CaptureSection('students')
   @Get('students')
   listStudents(@Req() req: any, @Param('id') id: string) {
     return this.registers.listStudents(req.user, id);
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('students')
   @Post('students')
   async createStudent(
     @Req() req: any,
@@ -99,12 +111,14 @@ export class RegistersController {
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('students')
   @Post('students/submit')
   submitStudents(@Req() req: any, @Param('id') id: string) {
     return this.registers.submitStudents(req.user, id);
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('students')
   @Put('students/:rowId')
   updateStudent(
     @Req() req: any,
@@ -116,6 +130,7 @@ export class RegistersController {
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('students')
   @Delete('students/:rowId')
   removeStudent(
     @Req() req: any,
@@ -127,12 +142,14 @@ export class RegistersController {
 
   // ─── Staff ───────────────────────────────────────────────────────────────────
   @Roles(...CAN_READ_SCHOOL_REGISTRY)
+  @CaptureSection('staff')
   @Get('staff')
   listStaff(@Req() req: any, @Param('id') id: string) {
     return this.registers.listStaff(req.user, id);
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('staff')
   @Post('staff')
   async createStaff(
     @Req() req: any,
@@ -144,12 +161,14 @@ export class RegistersController {
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('staff')
   @Post('staff/submit')
   submitStaff(@Req() req: any, @Param('id') id: string) {
     return this.registers.submitStaff(req.user, id);
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('staff')
   @Put('staff/:rowId')
   updateStaff(
     @Req() req: any,
@@ -161,6 +180,7 @@ export class RegistersController {
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)
+  @CaptureSection('staff')
   @Delete('staff/:rowId')
   removeStaff(
     @Req() req: any,

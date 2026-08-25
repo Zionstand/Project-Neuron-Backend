@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { accountBlockedPayload } from '../common/account-status';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -218,10 +219,11 @@ export class AuthService {
       };
     }
 
-    // Block pending / rejected / suspended accounts.
+    // Block pending / rejected / suspended / banned / deactivated accounts with
+    // copy that says what happened, why, and who to contact.
     if (user.accountStatus !== 'ACTIVE') {
       throw new UnauthorizedException(
-        `Account is currently ${user.accountStatus}. Please await admin action.`,
+        accountBlockedPayload(user.accountStatus, user.accountStatusReason),
       );
     }
 
@@ -376,7 +378,9 @@ export class AuthService {
     if (!isValid) throw new UnauthorizedException('Invalid refresh token');
 
     if (user.accountStatus !== 'ACTIVE') {
-      throw new UnauthorizedException(`Account is ${user.accountStatus}`);
+      throw new UnauthorizedException(
+        accountBlockedPayload(user.accountStatus, user.accountStatusReason),
+      );
     }
 
     await this.issueAccessToken(user, res);
@@ -447,6 +451,37 @@ export class AuthService {
     });
     if (!user) throw new NotFoundException('User not found.');
     return user;
+  }
+
+  /**
+   * Self-service profile edit. Deliberately narrow: a user may correct their own
+   * name and phone number. Email is identity (it is the login and where account
+   * notices go) and role/scope are RBAC decisions, so both stay with the
+   * administrator.
+   */
+  async updateProfile(
+    userId: string,
+    dto: { firstName?: string; lastName?: string; phoneNumber?: string },
+  ) {
+    if (dto.phoneNumber) {
+      const clash = await this.prisma.user.findFirst({
+        where: { phoneNumber: dto.phoneNumber, NOT: { id: userId } },
+        select: { id: true },
+      });
+      if (clash) {
+        throw new ConflictException(
+          'That phone number is already registered to another account.',
+        );
+      }
+    }
+
+    const data: Record<string, string> = {};
+    if (dto.firstName !== undefined) data.firstName = dto.firstName.trim();
+    if (dto.lastName !== undefined) data.lastName = dto.lastName.trim();
+    if (dto.phoneNumber !== undefined) data.phoneNumber = dto.phoneNumber.trim();
+
+    await this.prisma.user.update({ where: { id: userId }, data });
+    return this.getMe(userId);
   }
 
   async logout(userId: string, res: Response) {

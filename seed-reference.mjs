@@ -62,6 +62,9 @@ const LGAS = [
 
 // Class levels — code matches the AscRecord/StudentRecord classLevel string.
 const CLASS_LEVELS = [
+  // Nursery, captured as a single bucket rather than per nursery year (MoEST,
+  // Aug 2026). sortOrder 0 so it lands ahead of Pry1 without renumbering.
+  ['Pre-Primary', 'Pre-Primary (Nursery)', 'Pre-Primary', 0],
   ['Pry1', 'Primary 1', 'Primary', 1],
   ['Pry2', 'Primary 2', 'Primary', 2],
   ['Pry3', 'Primary 3', 'Primary', 3],

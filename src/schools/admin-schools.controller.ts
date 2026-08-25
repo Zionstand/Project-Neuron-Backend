@@ -38,8 +38,16 @@ export class AdminSchoolsController {
     @Query('q') q?: string,
     @Query('active') active?: string,
     @Query('cluster') cluster?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
   ) {
-    return this.schools.list({ lga, q, active, cluster });
+    return this.schools.list({ lga, q, active, cluster, page, pageSize });
+  }
+
+  // Full record: capture history, bound principal, GPS provenance, data volumes.
+  @Get(':id/detail')
+  getDetail(@Param('id') id: string) {
+    return this.schools.getDetail(id);
   }
 
   @Post()

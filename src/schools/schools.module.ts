@@ -9,9 +9,10 @@ import { AdminSchoolsController } from './admin-schools.controller';
 import { AdminSchoolsService } from './admin-schools.service';
 import { PublicSchoolsController } from './public-schools.controller';
 import { SessionsModule } from '../sessions/sessions.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
-  imports: [SessionsModule],
+  imports: [SessionsModule, NotificationsModule],
   controllers: [
     SchoolsController,
     RegistersController,

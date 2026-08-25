@@ -4,9 +4,13 @@ import {
   Get,
   Param,
   Post,
+  Query,
   Req,
+  Res,
+  StreamableFile,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../common/roles.guard';
 import { Roles } from '../common/roles.decorator';
@@ -25,15 +29,48 @@ export class OversightController {
   constructor(private readonly oversight: OversightService) {}
 
   @Get('submissions')
-  submissions(@Req() req: any) {
-    return this.oversight.listSubmissions(req.user);
+  submissions(
+    @Req() req: any,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    return this.oversight.listSubmissions(req.user, { page, pageSize });
   }
 
   // Risk is aggregated (no PII) — also visible to EXEC_VIEW, who cannot verify.
   @Roles(...CAN_VIEW_RISK)
   @Get('risk')
-  risk(@Req() req: any) {
-    return this.oversight.riskOverview(req.user);
+  risk(
+    @Req() req: any,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('tier') tier?: string,
+  ) {
+    return this.oversight.riskOverview(req.user, { page, pageSize, tier });
+  }
+
+  // Full security dataset as CSV. Unlike /risk this carries the individual
+  // answers, so it stays on the verifier roles rather than CAN_VIEW_RISK, and
+  // the download is recorded — a file of school vulnerabilities leaving the
+  // system is worth being able to account for later.
+  @Get('export/security.csv')
+  async exportSecurity(
+    @Req() req: any,
+    @Res({ passthrough: true }) res: Response,
+    @Query('periodId') periodId?: string,
+  ) {
+    const { csv, filename, rows } = await this.oversight.securityExport(
+      req.user,
+      periodId,
+    );
+    await this.oversight.recordExport(req.user, filename, rows);
+    res.set({
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      // The browser must not hold a copy of this in a shared cache.
+      'Cache-Control': 'no-store',
+    });
+    return new StreamableFile(Buffer.from(csv, 'utf-8'));
   }
 
   @Post('schools/:id/verify')

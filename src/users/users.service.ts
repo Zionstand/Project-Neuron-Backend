@@ -6,9 +6,16 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { parsePage, paged } from '../common/pagination';
 import { MailService } from '../mail/mail.service';
 import { AuditService } from '../audit/audit.service';
-import { AccountStatus, Role, type Prisma } from '../generated/prisma/client';
+import { NotificationsService } from '../notifications/notifications.service';
+import {
+  AccountStatus,
+  Role,
+  type NotificationType,
+  type Prisma,
+} from '../generated/prisma/client';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
 import slugify from 'slugify';
@@ -42,6 +49,33 @@ const PUBLIC_SELECT = {
   updatedAt: true,
 } satisfies Prisma.UserSelect;
 
+// Wording the affected person actually receives, per action.
+const STATUS_NOTIFICATION: Record<
+  string,
+  { type: NotificationType; title: string; body: string }
+> = {
+  SUSPEND: {
+    type: 'ACCOUNT_SUSPENDED',
+    title: 'Your account has been suspended',
+    body: 'A system administrator has paused your access to NEURON. You have been signed out and cannot sign in until the suspension is lifted.',
+  },
+  BAN: {
+    type: 'ACCOUNT_BANNED',
+    title: 'Your account has been banned',
+    body: 'A system administrator has permanently revoked your access to NEURON.',
+  },
+  DEACTIVATE: {
+    type: 'ACCOUNT_DEACTIVATED',
+    title: 'Your account has been deactivated',
+    body: 'Your NEURON account has been closed. If you need access again, a system administrator can reactivate it.',
+  },
+  REACTIVATE: {
+    type: 'ACCOUNT_REACTIVATED',
+    title: 'Your account has been reactivated',
+    body: 'Your access to NEURON has been restored. You can sign in again straight away.',
+  },
+};
+
 const STATUS_BY_ACTION: Record<string, AccountStatus> = {
   SUSPEND: AccountStatus.SUSPENDED,
   REACTIVATE: AccountStatus.ACTIVE,
@@ -55,9 +89,16 @@ export class UsersService {
     private prisma: PrismaService,
     private mail: MailService,
     private audit: AuditService,
+    private notifications: NotificationsService,
   ) {}
 
-  async list(filters: { status?: string; role?: string; q?: string }) {
+  async list(filters: {
+    status?: string;
+    role?: string;
+    q?: string;
+    page?: string;
+    pageSize?: string;
+  }) {
     const where: Prisma.UserWhereInput = {};
     if (filters.status) where.accountStatus = filters.status as AccountStatus;
     if (filters.role) where.role = filters.role as Role;
@@ -68,11 +109,20 @@ export class UsersService {
         { email: { contains: filters.q, mode: 'insensitive' } },
       ];
     }
-    return this.prisma.user.findMany({
-      where,
-      select: PUBLIC_SELECT,
-      orderBy: { createdAt: 'desc' },
-    });
+    // Filters apply before the page is cut, so the count reflects the search the
+    // user actually ran rather than the whole table.
+    const params = parsePage(filters.page, filters.pageSize);
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.user.findMany({
+        where,
+        select: PUBLIC_SELECT,
+        orderBy: { createdAt: 'desc' },
+        skip: params.skip,
+        take: params.take,
+      }),
+      this.prisma.user.count({ where }),
+    ]);
+    return paged(rows, total, params);
   }
 
   async pendingCount() {
@@ -90,6 +140,109 @@ export class UsersService {
     });
     if (!user) throw new NotFoundException('User not found.');
     return user;
+  }
+
+
+  /**
+   * Everything an administrator needs to judge one account in a single view:
+   * who they are, who provisioned them, the school they are bound to (principals)
+   * or the area they cover, what they have captured, and the trail of admin
+   * actions taken on them or by them.
+   *
+   * Approving or suspending someone you can't inspect is a guess; this is what
+   * turns it into a decision.
+   */
+  async getDetail(id: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id },
+      select: PUBLIC_SELECT,
+    });
+    if (!user) throw new NotFoundException('User not found.');
+
+    const [actionBy, school, visits, mediaCount, activity, performed] =
+      await Promise.all([
+        // The administrator who provisioned / approved / rejected this account.
+        user.actionById
+          ? this.prisma.user.findUnique({
+              where: { id: user.actionById },
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                role: true,
+              },
+            })
+          : Promise.resolve(null),
+
+        // PRINCIPAL accounts are bound to exactly one school.
+        user.assignedSchoolId
+          ? this.prisma.school.findUnique({
+              where: { id: user.assignedSchoolId },
+              select: {
+                id: true,
+                code: true,
+                name: true,
+                lgaName: true,
+                zoneName: true,
+                isActive: true,
+              },
+            })
+          : Promise.resolve(null),
+
+        // Capture work: the visits this user is the inspector of record for.
+        this.prisma.schoolVisit.findMany({
+          where: { inspectorId: id },
+          orderBy: { updatedAt: 'desc' },
+          take: 25,
+          select: {
+            id: true,
+            overallStatus: true,
+            updatedAt: true,
+            school: { select: { id: true, code: true, name: true, lgaName: true } },
+          },
+        }),
+
+        this.prisma.schoolMedia.count({ where: { uploadedById: id } }),
+
+        // Administrative actions taken ON this account.
+        this.prisma.auditLog.findMany({
+          where: { targetType: 'USER', targetId: id },
+          orderBy: { createdAt: 'desc' },
+          take: 25,
+        }),
+
+        // Administrative actions taken BY this account (relevant for supervisors).
+        this.prisma.auditLog.findMany({
+          where: { actorId: id },
+          orderBy: { createdAt: 'desc' },
+          take: 25,
+        }),
+      ]);
+
+    const byStatus = await this.prisma.schoolVisit.groupBy({
+      by: ['overallStatus'],
+      where: { inspectorId: id },
+      _count: { _all: true },
+    });
+
+    return {
+      user,
+      actionBy,
+      school,
+      stats: {
+        visits: byStatus.reduce((sum, r) => sum + r._count._all, 0),
+        byStatus: Object.fromEntries(
+          byStatus.map((r) => [r.overallStatus, r._count._all]),
+        ),
+        mediaUploaded: mediaCount,
+      },
+      visits,
+      // Actions taken on the account (approvals, suspensions, role changes).
+      history: activity,
+      // Actions this user performed, for supervisor and admin roles.
+      performed,
+    };
   }
 
   async provision(adminId: string, dto: ProvisionUserDto) {
@@ -178,6 +331,18 @@ export class UsersService {
       targetLabel: user.email,
       metadata: { role: user.role, assignedLga: user.assignedLga },
     });
+
+    // The approval email already went out above; this adds the in-app record so
+    // the notification centre reflects the same events the inbox does.
+    await this.notifications.notify({
+      userId: user.id,
+      type: 'ACCOUNT_APPROVED',
+      title: 'Your account has been approved',
+      body: `Your NEURON account is active. You have been assigned the ${user.role.replace(/_/g, ' ')} role.`,
+      link: '/',
+      forceEmail: false,
+    });
+
     return user;
   }
 
@@ -211,6 +376,17 @@ export class UsersService {
       targetLabel: user.email,
       metadata: { reason: dto.reason ?? null },
     });
+
+    await this.notifications.notify({
+      userId: user.id,
+      type: 'ACCOUNT_REJECTED',
+      title: 'Your registration was not approved',
+      body: dto.reason?.trim()
+        ? `A system administrator reviewed your registration and did not approve it. Reason given: “${dto.reason.trim()}”.`
+        : 'A system administrator reviewed your registration and did not approve it.',
+      forceEmail: false,
+    });
+
     return user;
   }
 
@@ -246,6 +422,15 @@ export class UsersService {
       targetLabel: updated.email,
       metadata: { role: updated.role, assignedLga: updated.assignedLga },
     });
+
+    await this.notifications.notify({
+      userId: id,
+      type: 'ROLE_CHANGED',
+      title: 'Your role has been updated',
+      body: `A system administrator changed your role to ${updated.role.replace(/_/g, ' ')}. What you can see and do in NEURON has changed accordingly.`,
+      link: '/',
+    });
+
     return updated;
   }
 
@@ -282,6 +467,20 @@ export class UsersService {
       targetLabel: updated.email,
       metadata: { action: dto.action, status: nextStatus, reason: dto.reason ?? null },
     });
+
+    // Tell them, in the app and by email. Being suspended without being told is
+    // the single worst version of this flow — the reason the administrator typed
+    // is carried through verbatim.
+    const copy = STATUS_NOTIFICATION[dto.action];
+    await this.notifications.notify({
+      userId: id,
+      type: copy.type,
+      title: copy.title,
+      body: dto.reason?.trim()
+        ? `${copy.body} Reason given: “${dto.reason.trim()}”.`
+        : copy.body,
+    });
+
     return updated;
   }
 
@@ -308,6 +507,14 @@ export class UsersService {
       targetId: id,
       targetLabel: user.email,
     });
+
+    await this.notifications.notify({
+      userId: id,
+      type: 'PASSWORD_RESET',
+      title: 'Your password was reset',
+      body: 'A system administrator reset your password. Use the temporary password you were given, and choose a new one when you sign in.',
+    });
+
     return { tempPassword };
   }
 

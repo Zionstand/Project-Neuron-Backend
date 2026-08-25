@@ -12,7 +12,27 @@ import {
 } from './schools.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { CaptureStatus, CaptureSource } from '../generated/prisma/client';
-import { MediaUploadDto, MediaMetaDto } from './dto/media.dto';
+import {
+  MediaUploadDto,
+  MediaMetaDto,
+  SignUploadDto,
+  ConfirmUploadDto,
+} from './dto/media.dto';
+import { randomUUID } from 'crypto';
+
+// Upload ceilings, enforced when the signature is issued AND again against what
+// actually landed on Cloudinary. Video is capped by duration as well as size:
+// a field clip is meant to be a short walk-through, and duration is the limit an
+// inspector can actually act on ("record a shorter clip").
+export const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+export const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+export const MAX_VIDEO_SECONDS = 180;
+// Browser-side chunk size for the direct upload. Small enough that a dropped
+// connection on 3G costs one chunk, large enough to avoid per-request overhead.
+export const UPLOAD_CHUNK_BYTES = 6 * 1024 * 1024;
+
+const formatMb = (bytes: number) =>
+  `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 
 const ALLOWED_IMAGE_MIME = [
   'image/jpeg',
@@ -207,6 +227,199 @@ export class MediaService {
       if (e?.code === 'P2002' && dto.clientId) {
         await this.cloudinary
           .deleteImage(result.public_id, isVideo ? 'video' : 'image')
+          .catch(() => undefined);
+        const winner = await this.prisma.schoolMedia.findUnique({
+          where: {
+            schoolId_periodId_source_clientId: {
+              schoolId,
+              periodId: period.id,
+              source,
+              clientId: dto.clientId,
+            },
+          },
+        });
+        if (winner) return this.withSignedUrl(winner);
+      }
+      throw e;
+    }
+
+    await this.bump(schoolId, period, user.id, source);
+    return this.withSignedUrl(row);
+  }
+
+
+  // ─── Direct upload: sign → (browser uploads) → confirm ─────────────────────
+
+  /**
+   * Authorise a browser-side upload. Runs the same scope and capture-period
+   * checks as the proxied route, then hands back a signature the browser uses to
+   * post the bytes straight to Cloudinary. Nothing is recorded yet.
+   */
+  async signUpload(user: RequestUser, schoolId: string, dto: SignUploadDto) {
+    const resourceType = dto.mediaType === 'video' ? 'video' : 'image';
+    await this.schools.requireScopedSchool(user, schoolId);
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    const source = sourceForUser(user);
+    await this.schools.ensureVisit(
+      schoolId,
+      period.id,
+      period.sessionId,
+      user.id,
+      source,
+    );
+
+    const limit = resourceType === 'video' ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
+    if (dto.bytes > limit) {
+      throw new BadRequestException(
+        resourceType === 'video'
+          ? `Video is ${formatMb(dto.bytes)}. The limit is ${formatMb(limit)} — record a shorter clip (up to ${MAX_VIDEO_SECONDS / 60} minutes) and try again.`
+          : `Photo is ${formatMb(dto.bytes)}. The limit is ${formatMb(limit)}.`,
+      );
+    }
+
+    // The asset id is chosen by the server and covered by the signature, so a
+    // client cannot redirect its upload into another school's folder — verified
+    // against the live API: altering public_id returns 401 Invalid Signature.
+    //
+    // The folder is part of the id rather than a separate `folder` parameter;
+    // Cloudinary prepends one to the other, which would nest the path twice.
+    // (For image and video the stored id matches this exactly. Only `raw`
+    // assets get a file extension appended, and we never upload those.)
+    const folder = `neuron/schools/${schoolId}`;
+    const publicId = `${folder}/${randomUUID()}`;
+
+    const signed = this.cloudinary.signUploadParams({
+      publicId,
+      resourceType,
+    });
+
+    return {
+      ...signed,
+      publicId,
+      resourceType,
+      maxBytes: limit,
+      // Chunk size for the browser's chunked upload, in bytes.
+      chunkSize: UPLOAD_CHUNK_BYTES,
+    };
+  }
+
+  /**
+   * Record an asset the browser uploaded directly. Metadata is read back from
+   * Cloudinary rather than taken from the request body — the client is not
+   * trusted about what it uploaded, or about whether it uploaded anything.
+   */
+  async confirmUpload(user: RequestUser, schoolId: string, dto: ConfirmUploadDto) {
+    const resourceType = dto.resourceType === 'video' ? 'video' : 'image';
+    await this.schools.requireScopedSchool(user, schoolId);
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    const source = sourceForUser(user);
+
+    // The asset must live in this school's folder. Without this check a caller
+    // could confirm any public_id in the account, including another school's.
+    if (!dto.publicId.startsWith(`neuron/schools/${schoolId}/`)) {
+      throw new BadRequestException('That asset does not belong to this school.');
+    }
+
+    // Replay of a queued upload whose response was lost — return the existing row.
+    if (dto.clientId) {
+      const already = await this.prisma.schoolMedia.findUnique({
+        where: {
+          schoolId_periodId_source_clientId: {
+            schoolId,
+            periodId: period.id,
+            source,
+            clientId: dto.clientId,
+          },
+        },
+      });
+      if (already) {
+        // The retry uploaded a second copy of the same file; drop it.
+        if (already.publicId !== dto.publicId) {
+          await this.cloudinary
+            .deleteImage(dto.publicId, resourceType)
+            .catch(() => undefined);
+        }
+        return this.withSignedUrl(already);
+      }
+    }
+
+    const asset = await this.cloudinary.getResource(dto.publicId, resourceType);
+    if (!asset) {
+      throw new BadRequestException(
+        "That upload didn't complete. Please try again.",
+      );
+    }
+
+    const bytes = asset.bytes ?? 0;
+    const limit = resourceType === 'video' ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
+    const duration =
+      typeof asset.duration === 'number' ? Math.round(asset.duration) : null;
+
+    // Enforce the caps against what actually landed, and clean up the asset if
+    // it breaches them so nothing oversized lingers in the account.
+    const tooBig = bytes > limit;
+    const tooLong =
+      resourceType === 'video' && duration !== null && duration > MAX_VIDEO_SECONDS;
+    if (tooBig || tooLong) {
+      await this.cloudinary
+        .deleteImage(dto.publicId, resourceType)
+        .catch(() => undefined);
+      throw new BadRequestException(
+        tooLong
+          ? `That clip is ${duration}s. Videos must be ${MAX_VIDEO_SECONDS}s or shorter.`
+          : `That file is ${formatMb(bytes)}, over the ${formatMb(limit)} limit.`,
+      );
+    }
+
+    const exif =
+      resourceType === 'video'
+        ? { lat: null, lng: null, takenAt: null }
+        : extractExifGps(asset);
+
+    const makePrimary = dto.isPrimary === true;
+    if (makePrimary) {
+      await this.prisma.schoolMedia.updateMany({
+        where: { schoolId, periodId: period.id, source, isPrimary: true },
+        data: { isPrimary: false },
+      });
+    }
+
+    const mediaCategory = await this.prisma.mediaCategory.findUnique({
+      where: { code: dto.category },
+    });
+
+    let row;
+    try {
+      row = await this.prisma.schoolMedia.create({
+        data: {
+          schoolId,
+          sessionId: period.sessionId,
+          periodId: period.id,
+          source,
+          uploadedById: user.id,
+          clientId: dto.clientId ?? null,
+          category: dto.category,
+          mediaCategoryId: mediaCategory?.id ?? null,
+          caption: dto.caption,
+          mediaType: resourceType,
+          publicId: dto.publicId,
+          fileUrl: '',
+          originalFileName: dto.originalFileName ?? null,
+          format: asset.format ?? null,
+          bytes,
+          width: asset.width ?? null,
+          height: asset.height ?? null,
+          videoDurationSecs: duration,
+          gpsLatitude: exif.lat,
+          gpsLongitude: exif.lng,
+          captureTimestamp: exif.takenAt,
+          isPrimary: makePrimary,
+        },
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2002' && dto.clientId) {
+        await this.cloudinary
+          .deleteImage(dto.publicId, resourceType)
           .catch(() => undefined);
         const winner = await this.prisma.schoolMedia.findUnique({
           where: {

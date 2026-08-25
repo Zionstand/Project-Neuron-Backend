@@ -110,4 +110,89 @@ export class CloudinaryService {
       );
     }
   }
+
+  // ─── Signed direct (browser → Cloudinary) upload ───────────────────────────
+  //
+  // Routing bytes through the API server meant a field clip was uploaded twice:
+  // once over the inspector's 3G link into the server's memory, then again from
+  // the server to Cloudinary — with the original HTTP request held open for the
+  // whole of both. Anything sizeable outran the host's request timeout.
+  //
+  // Instead the server signs a short-lived upload request and the browser posts
+  // the bytes straight to Cloudinary (chunked, so a dropped connection costs one
+  // chunk rather than the whole file). The server never sees the file; it
+  // verifies the resulting asset through the Admin API before recording it.
+
+  /**
+   * Sign an upload the browser will perform on its own. The signature covers the
+   * exact parameters returned here — Cloudinary rejects the upload if the client
+   * alters any of them, so the folder and asset id cannot be tampered with.
+   */
+  signUploadParams(params: {
+    publicId: string;
+    resourceType: 'image' | 'video';
+  }): {
+    uploadUrl: string;
+    cloudName: string;
+    apiKey: string;
+    timestamp: number;
+    signature: string;
+    params: Record<string, string>;
+  } {
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME ?? '';
+    const apiKey = process.env.CLOUDINARY_API_KEY ?? '';
+    const apiSecret = process.env.CLOUDINARY_API_SECRET ?? '';
+    const timestamp = Math.round(Date.now() / 1000);
+
+    // Signed set. `type: authenticated` keeps the asset private, exactly as the
+    // server-side upload did — there is no publicly reachable URL for it.
+    //
+    // NOTE: no `folder` param. Cloudinary PREPENDS folder to public_id, so
+    // sending both a folder and a folder-qualified public_id stores the asset at
+    // "neuron/schools/X/neuron/schools/X/<id>" — and the confirm step, looking up
+    // the id we handed the client, would never find it. The full path lives in
+    // public_id alone, which the signature still covers.
+    const toSign: Record<string, string> = {
+      public_id: params.publicId,
+      timestamp: String(timestamp),
+      type: 'authenticated',
+    };
+    // EXIF (and therefore GPS) only comes back for images.
+    if (params.resourceType === 'image') toSign.image_metadata = 'true';
+
+    const signature = cloudinary.utils.api_sign_request(toSign, apiSecret);
+
+    return {
+      uploadUrl: `https://api.cloudinary.com/v1_1/${cloudName}/${params.resourceType}/upload`,
+      cloudName,
+      apiKey,
+      timestamp,
+      signature,
+      params: toSign,
+    };
+  }
+
+  /**
+   * Read an asset's real metadata from Cloudinary. The confirm step uses this
+   * instead of trusting the numbers the browser reports: the client could claim
+   * any size, duration or public_id it liked.
+   */
+  async getResource(
+    publicId: string,
+    resourceType: 'image' | 'video' = 'image',
+  ): Promise<UploadApiResponse | null> {
+    try {
+      const res = await cloudinary.api.resource(publicId, {
+        resource_type: resourceType,
+        type: 'authenticated',
+        image_metadata: resourceType === 'image',
+      });
+      return res as unknown as UploadApiResponse;
+    } catch (e) {
+      this.logger.warn(
+        `Cloudinary resource lookup failed for ${publicId}: ${(e as Error).message}`,
+      );
+      return null;
+    }
+  }
 }

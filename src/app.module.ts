@@ -14,6 +14,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
 import { UsersModule } from './users/users.module';
 import { OversightModule } from './oversight/oversight.module';
 import { ReferenceModule } from './reference/reference.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { ReferenceModule } from './reference/reference.module';
     UsersModule,
     OversightModule,
     ReferenceModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [

@@ -56,6 +56,10 @@ model User {
   visits           SchoolVisit[]           @relation("InspectorVisits")
   securityProfiles SchoolSecurityProfile[] @relation("SecurityCollected")
 
+  // Notifications
+  notifications          Notification[]          @relation("UserNotifications")
+  notificationPreference NotificationPreference? @relation("UserNotificationPreference")
+
   // Auth / Password Reset
   refreshToken   String?
   resetOTP       String?
@@ -185,7 +189,7 @@ model ClassLevel {
   id             String   @id @default(uuid())
   code           String   @unique // matches the AscRecord/StudentRecord classLevel string
   name           String
-  educationLevel String? // Primary | Junior Secondary | Senior Secondary
+  educationLevel String? // Pre-Primary | Primary | Junior Secondary | Senior Secondary
   sortOrder      Int      @default(0)
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
@@ -284,6 +288,10 @@ model School {
   cluster        String?
   ward           String?
   community      String?
+  // Rural vs urban siting, from the Ministry's school register. Kept because
+  // isolation is the single strongest driver of the vulnerability score and this
+  // is the cheapest reliable signal for it.
+  setting        String? // Rural | Urban / Peri-urban
   address        String?
   latitude       Float?
   longitude      Float?
@@ -360,6 +368,7 @@ model SchoolVisit {
 // Postgres enums. All capture fields are nullable so a partial draft can be
 // saved; the submit endpoint enforces required fields and fills the computed
 // scores. The five score fields + tier are never entered by the LIE.
+// (isolation, infrastructure, communication, exposure, composite — plus riskTier.)
 model SchoolSecurityProfile {
   id            String  @id @default(uuid())
   schoolId      String
@@ -384,6 +393,10 @@ model SchoolSecurityProfile {
   // Module A — Location & Access
   distanceToMajorRoadKm    Float?
   roadSurfaceType          String? // Tarmac | Laterite | Gravel | Footpath Only | None
+  // Condition of that surface, captured separately from its material: a tarred
+  // road full of potholes and a well-graded earth road are both real, and it is
+  // the condition that decides whether help can actually get through.
+  roadCondition            String? // Good | Fair | Poor
   estimatedTravelTimeMins  Int?
   nearestTown              String?
   forestProximity          String? // Adjacent | Near | Moderate | Distant
@@ -398,6 +411,8 @@ model SchoolSecurityProfile {
   hasElectricity       Boolean?
   hasSolar             Boolean?
   hasExternalLighting  Boolean?
+  hasHealthFacility    Boolean?
+  waterSource          String? // Piped | Borehole | Well | Rain Water | None
 
   // Module C — Communication & Emergency Capacity
   hasPhoneNetwork          Boolean?
@@ -408,6 +423,7 @@ model SchoolSecurityProfile {
   hasEmergencyProtocol     Boolean?
   distanceToSecurityPostKm Float?
   nearestSecurityPostName  String?
+  hasSecurityGuard         Boolean?
 
   // Module D — Incident History
   hadSecurityIncident    Boolean?
@@ -415,11 +431,17 @@ model SchoolSecurityProfile {
   mostRecentIncidentYear Int?
   mostRecentIncidentType String? // Threat | Robbery | Abduction | Physical Attack | Vandalism | Other
   incidentReportedToAuth Boolean?
+  // Inspection cadence — asked of every school, not only those with an incident.
+  lastInspectionDate       DateTime?
+  inspectionVisitsLastYear Int?
 
   // Computed risk scores (set on submit, 0–100; higher = more vulnerable)
   isolationScore      Float?
   infrastructureScore Float?
   communicationScore  Float?
+  // Intrinsic exposure from the Module A0 profile (boarding / gender / ownership)
+  // — what the school is, as opposed to what it lacks.
+  exposureScore       Float?
   compositeRiskScore  Float?
   riskTier            String? // High | Moderate | Low
 
@@ -646,4 +668,69 @@ model SchoolMedia {
   @@unique([schoolId, periodId, source, clientId])
   @@index([schoolId, sessionId])
   @@index([schoolId, periodId])
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+//
+// In-app notifications. Email is sent alongside these by NotificationsService
+// (it does not read from this table); the row is the record the bell renders and
+// the user marks read. Kept deliberately simple: no per-notification threading,
+// no grouping — a flat, newest-first feed per user.
+
+enum NotificationType {
+  ACCOUNT_APPROVED
+  ACCOUNT_REJECTED
+  ACCOUNT_SUSPENDED
+  ACCOUNT_BANNED
+  ACCOUNT_REACTIVATED
+  ACCOUNT_DEACTIVATED
+  ROLE_CHANGED
+  PASSWORD_RESET
+  SECTION_SUBMITTED
+  SECTION_VERIFIED
+  SECTION_RETURNED
+  MEDIA_SYNCED
+  CAPTURE_PERIOD_OPENED
+  CAPTURE_PERIOD_CLOSED
+  SYSTEM
+}
+
+model Notification {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation("UserNotifications", fields: [userId], references: [id], onDelete: Cascade)
+
+  type  NotificationType
+  title String
+  body  String
+  // In-app deep link (e.g. /schools/<id>/media). Null for purely informational rows.
+  link  String?
+
+  // Whether the matching email actually went out, so support can tell "we never
+  // sent it" apart from "they didn't read it".
+  emailSent   Boolean   @default(false)
+  emailSentAt DateTime?
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+}
+
+// Per-user delivery preferences. A row is created lazily on first read; absent
+// means "all defaults on".
+model NotificationPreference {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation("UserNotificationPreference", fields: [userId], references: [id], onDelete: Cascade)
+
+  // Account-standing changes always email regardless of this — being suspended
+  // is not something a preference should be able to silence.
+  emailOnCaptureActivity Boolean @default(true)
+  emailOnVerification    Boolean @default(true)
+  emailOnMediaSync       Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

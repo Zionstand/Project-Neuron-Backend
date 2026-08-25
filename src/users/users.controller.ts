@@ -34,8 +34,10 @@ export class UsersController {
     @Query('status') status?: string,
     @Query('role') role?: string,
     @Query('q') q?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
   ) {
-    return this.users.list({ status, role, q });
+    return this.users.list({ status, role, q, page, pageSize });
   }
 
   @Get('pending-count')
@@ -46,6 +48,12 @@ export class UsersController {
   @Get(':id')
   getOne(@Param('id') id: string) {
     return this.users.getOne(id);
+  }
+
+  // Full profile: assignment, provisioning trail, capture record, admin history.
+  @Get(':id/detail')
+  getDetail(@Param('id') id: string) {
+    return this.users.getDetail(id);
   }
 
   @Post()

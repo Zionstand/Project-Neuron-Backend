@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { SessionsService } from '../sessions/sessions.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import type { Prisma } from '../generated/prisma/client';
 import {
   CaptureStatus,
@@ -97,11 +98,36 @@ export interface SchoolWorklistItem {
   } | null;
 }
 
+// `lastInspectionDate` arrives from the date picker as "YYYY-MM-DD". Prisma's
+// DateTime input wants a Date (or a full RFC-3339 string), so a bare date string
+// would be rejected at write time — convert it here, once, before the DTO is
+// spread into the upsert.
+function normalizeSecurityDto<T extends Record<string, any>>(dto: T) {
+  if (typeof dto.lastInspectionDate !== 'string') return dto;
+  const raw = dto.lastInspectionDate.trim();
+  if (!raw) return { ...dto, lastInspectionDate: null };
+  const parsed = new Date(raw.length === 10 ? `${raw}T00:00:00.000Z` : raw);
+  return {
+    ...dto,
+    lastInspectionDate: Number.isNaN(parsed.getTime()) ? null : parsed,
+  };
+}
+
+// Human labels for the notification copy, keyed by the visit's status column.
+const SECTION_NOTIFICATION_LABEL: Partial<Record<SectionField, string>> = {
+  ascStatus: 'Annual School Census',
+  studentsStatus: 'Student enrolment',
+  staffStatus: 'Staff register',
+  securityStatus: 'Security assessment',
+  mediaStatus: 'Media capture',
+};
+
 @Injectable()
 export class SchoolsService {
   constructor(
     private prisma: PrismaService,
     private sessions: SessionsService,
+    private notifications: NotificationsService,
   ) {}
 
   // Geographic scoping is enforced HERE, not in the guard (RBAC Rule 3).
@@ -157,16 +183,44 @@ export class SchoolsService {
 
     if (!where) return { session, schools: [] };
 
+    // Deliberately NOT paginated: this response is cached wholesale for offline
+    // capture, so an inspector who received only the first page would reach the
+    // field able to work only those schools. It is trimmed instead — `select`
+    // rather than `include`, so the roughly two dozen columns the worklist never
+    // reads (GPS provenance, timestamps, FK ids) don't cross the wire — and the
+    // client pages the rendering.
     const schools = await this.prisma.school.findMany({
       where,
       orderBy: { name: 'asc' },
-      // Filter to the current capture PERIOD AND the caller's own channel; when no
-      // period is configured the sentinel id matches nothing, so every school comes
-      // back with an empty visits array.
-      include: {
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        type: true,
+        ownership: true,
+        category: true,
+        genderCategory: true,
+        lgaName: true,
+        ward: true,
+        community: true,
+        address: true,
+        latitude: true,
+        longitude: true,
+        // Filter to the current capture PERIOD AND the caller's own channel; when
+        // no period is configured the sentinel id matches nothing, so every school
+        // comes back with an empty visits array.
         visits: {
           where: { periodId: period?.id ?? '__no_period__', source },
           take: 1,
+          select: {
+            id: true,
+            overallStatus: true,
+            ascStatus: true,
+            studentsStatus: true,
+            staffStatus: true,
+            securityStatus: true,
+            mediaStatus: true,
+          },
         },
       },
     });
@@ -403,6 +457,7 @@ export class SchoolsService {
       },
     });
     const status = existing?.recordStatus ?? CaptureStatus.DRAFT;
+    const data = normalizeSecurityDto(dto);
 
     await this.prisma.schoolSecurityProfile.upsert({
       where: {
@@ -415,9 +470,9 @@ export class SchoolsService {
         source,
         collectedById: user.id,
         recordStatus: CaptureStatus.DRAFT,
-        ...dto,
+        ...data,
       },
-      update: { collectedById: user.id, ...dto },
+      update: { collectedById: user.id, ...data },
     });
 
     await this.setSectionStatus(visit.id, 'securityStatus', status);
@@ -451,6 +506,7 @@ export class SchoolsService {
     this.assertSubmittable(effective);
 
     const scores = computeRiskScores(effective as SecurityAssessmentDto);
+    const data = normalizeSecurityDto(dto);
 
     await this.prisma.schoolSecurityProfile.upsert({
       where: {
@@ -462,14 +518,14 @@ export class SchoolsService {
         periodId: period.id,
         source,
         collectedById: user.id,
-        ...dto,
+        ...data,
         ...scores,
         recordStatus: CaptureStatus.SUBMITTED,
         submittedAt: new Date(),
       },
       update: {
         collectedById: user.id,
-        ...dto,
+        ...data,
         ...scores,
         recordStatus: CaptureStatus.SUBMITTED,
         submittedAt: new Date(),
@@ -571,5 +627,62 @@ export class SchoolsService {
       where: { id: visitId },
       data: { [field]: status, overallStatus },
     });
+
+    // Every route into "submitted" passes through here — the five register
+    // submits, the security submit and the media submit — so this is the one
+    // place a supervisor notification has to be raised.
+    if (
+      status === CaptureStatus.SUBMITTED &&
+      visit[field] !== CaptureStatus.SUBMITTED
+    ) {
+      await this.announceSubmission(visit.schoolId, field);
+    }
+  }
+
+  /**
+   * Let the supervisors responsible for a school know a section is waiting on
+   * them. Scope mirrors RBAC Rule 3: the LGA's inspectors of record plus the
+   * zone's coordinator, and system administrators.
+   *
+   * Best-effort — a failure here must never undo the submission itself.
+   */
+  private async announceSubmission(schoolId: string, field: SectionField) {
+    try {
+      const school = await this.prisma.school.findUnique({
+        where: { id: schoolId },
+        select: { name: true, lgaName: true, zoneName: true, cluster: true },
+      });
+      if (!school) return;
+
+      const supervisors = await this.prisma.user.findMany({
+        where: {
+          isDeleted: false,
+          accountStatus: 'ACTIVE',
+          OR: [
+            { role: 'SYS_ADMIN' },
+            { role: 'ZONAL_COORD', assignedZone: school.zoneName ?? undefined },
+            {
+              role: 'INSPECT_OFFICER',
+              assignedCluster: school.cluster ?? undefined,
+            },
+          ],
+        },
+        select: { id: true },
+      });
+      if (!supervisors.length) return;
+
+      const label = SECTION_NOTIFICATION_LABEL[field] ?? 'A section';
+      await this.notifications.notifyMany(
+        supervisors.map((u) => u.id),
+        {
+          type: 'SECTION_SUBMITTED',
+          title: `${label} submitted for review`,
+          body: `${label} for ${school.name} (${school.lgaName}) has been submitted and is waiting for verification.`,
+          link: `/admin/submissions`,
+        },
+      );
+    } catch {
+      // Swallowed deliberately: the submission has already been recorded.
+    }
   }
 }

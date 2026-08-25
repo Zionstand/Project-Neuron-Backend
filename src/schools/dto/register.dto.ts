@@ -15,6 +15,7 @@ import {
 // ─── Option sets (Field Capture Guide §§2–4) ──────────────────────────────────
 export const GENDERS = ['MALE', 'FEMALE'] as const;
 export const CLASS_LEVELS = [
+  'Pre-Primary',
   'Pry1',
   'Pry2',
   'Pry3',

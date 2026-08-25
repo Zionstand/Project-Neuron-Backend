@@ -211,4 +211,56 @@ export class MailService {
       html,
     );
   }
+
+  // ─── GENERIC NOTIFICATION ───────────────────────────────────────────────────
+  //
+  // One template behind every notification email. NotificationsService owns the
+  // wording and decides who gets what; this just renders and sends it, and
+  // reports whether it actually left, so the in-app row can record that.
+
+  async sendNotificationEmail(
+    to: string,
+    subject: string,
+    heading: string,
+    lines: string[],
+    action?: { label: string; url: string },
+  ): Promise<boolean> {
+    const paragraphs = lines
+      .map(
+        (l) =>
+          `<p style="color:#333;font-size:14px;line-height:1.6;margin:0 0 12px;">${l}</p>`,
+      )
+      .join('');
+
+    const button = action
+      ? `<p style="margin:24px 0 0;"><a href="${action.url}" style="background:${BRAND_GREEN};color:#fff;text-decoration:none;padding:12px 22px;border-radius:6px;display:inline-block;font-size:14px;font-weight:bold;">${action.label}</a></p>`
+      : '';
+
+    const support = process.env.SUPPORT_EMAIL_ADDRESS;
+    const footer = support
+      ? `<p style="color:#777;font-size:12px;margin:24px 0 0;">Need help? Contact <a href="mailto:${support}" style="color:${BRAND_GREEN};">${support}</a>.</p>`
+      : '';
+
+    const html = this.wrap(
+      BRAND_GREEN,
+      heading,
+      `${paragraphs}${button}${footer}`,
+    );
+
+    const from = `"${PORTAL_NAME}" <${process.env.SENDER_EMAIL_ADDRESS}>`;
+    try {
+      const info = await this.transporter.sendMail({
+        from,
+        to,
+        subject,
+        html,
+      });
+      this.logger.log(`Email sent to ${to} — ${subject} [${info.messageId}]`);
+      return true;
+    } catch (err: any) {
+      // A failed email must never fail the action that triggered it.
+      this.logger.error(`Failed to send email to ${to}: ${err.message}`);
+      return false;
+    }
+  }
 }
