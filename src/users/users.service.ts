@@ -256,6 +256,8 @@ export class UsersService {
       );
     }
 
+    await this.assertScopeRefs(dto);
+
     const tempPassword = this.generateTempPassword();
     const password = await bcrypt.hash(tempPassword, 10);
     const username = await this.uniqueUsername(dto.firstName, dto.lastName);
@@ -302,6 +304,7 @@ export class UsersService {
     if (target.accountStatus !== AccountStatus.PENDING) {
       throw new BadRequestException('Only pending accounts can be approved.');
     }
+    await this.assertScopeRefs(dto);
     const user = await this.prisma.user.update({
       where: { id },
       data: {
@@ -401,6 +404,8 @@ export class UsersService {
     ) {
       await this.assertAnotherActiveAdminExists(id);
     }
+
+    await this.assertScopeRefs(dto);
 
     const updated = await this.prisma.user.update({
       where: { id },
@@ -544,6 +549,48 @@ export class UsersService {
       throw new BadRequestException(
         'At least one active administrator must remain.',
       );
+    }
+  }
+
+  // assignedLga and assignedZone are matched against School.lgaName / zoneName
+  // by exact string equality — scopeFor() builds a coordinator's entire school
+  // list from one, and supervisor notifications are routed by it. A value that
+  // matches nothing doesn't error anywhere downstream; the user simply sees an
+  // empty list forever. The admin form offers only reference rows now, but the
+  // API is reachable without it, so the check belongs here too.
+  //
+  // Blank clears the scope and is always allowed. assignedCluster is deliberately
+  // not checked: there is no reference table for clusters (and no school
+  // currently carries one), so there is nothing to check it against.
+  private async assertScopeRefs(dto: {
+    assignedLga?: string | null;
+    assignedZone?: string | null;
+  }) {
+    const lga = dto.assignedLga?.trim();
+    const zone = dto.assignedZone?.trim();
+
+    if (lga) {
+      const row = await this.prisma.lga.findFirst({
+        where: { name: lga, isActive: true },
+        select: { id: true },
+      });
+      if (!row) {
+        throw new BadRequestException(
+          `"${lga}" is not a known LGA. Pick one from the list, or add it under Reference data first.`,
+        );
+      }
+    }
+
+    if (zone) {
+      const row = await this.prisma.zone.findFirst({
+        where: { name: zone, isActive: true },
+        select: { id: true },
+      });
+      if (!row) {
+        throw new BadRequestException(
+          `"${zone}" is not a known zone. Pick one from the list, or add it under Reference data first.`,
+        );
+      }
     }
   }
 
