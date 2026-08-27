@@ -232,6 +232,7 @@ model MediaCategory {
   mediaTypeAllowed String   @default("image") // image | video | both
   maxFilesAllowed  Int?
   description      String? // shown to the enumerator as shooting instructions
+  sortOrder        Int      @default(0) // shot-list order; codes are opaque so ordering can't come from them
   isActive         Boolean  @default(true)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -666,6 +667,37 @@ model SchoolMedia {
   updatedAt DateTime @updatedAt
 
   @@unique([schoolId, periodId, source, clientId])
+  @@index([schoolId, sessionId])
+  @@index([schoolId, periodId])
+}
+
+// Coverage marks for the media shot list.
+//
+// A photo proves a subject is there; this table is how its ABSENCE is recorded.
+// Without it "no fire extinguisher photo" is ambiguous between "the school has
+// no extinguisher" and "nobody looked" — and the checklist could only ever show
+// a gap the inspector had no honest way to close. Marking absence turns a hole
+// in the coverage into a finding, which is the more useful datum for a security
+// assessment anyway.
+//
+// Keyed by source like SchoolMedia: a principal's checklist and an inspector's
+// are separate passes over the same school and must not overwrite each other.
+model MediaCoverage {
+  id           String        @id @default(uuid())
+  schoolId     String
+  sessionId    String
+  periodId     String
+  categoryCode String // matches MediaCategory.code
+  source       CaptureSource @default(INSPECTOR)
+
+  status     String  @default("NOT_PRESENT") // NOT_PRESENT
+  note       String?
+  markedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, periodId, source, categoryCode])
   @@index([schoolId, sessionId])
   @@index([schoolId, periodId])
 }

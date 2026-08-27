@@ -28,6 +28,7 @@ import {
   MediaMetaDto,
   SignUploadDto,
   ConfirmUploadDto,
+  MarkCoverageDto,
 } from './dto/media.dto';
 
 // Photos only, and small ones. Anything larger — and all video — goes through
@@ -106,6 +107,28 @@ export class MediaController {
   @Post('submit')
   submit(@Req() req: any, @Param('id') id: string) {
     return this.media.submit(req.user, id);
+  }
+
+  // Shot-list coverage. Declared above the ':mediaId' routes so the literal
+  // 'coverage' segment is never read as a media id.
+  @Roles(...CAN_SUBMIT_INSPECTION)
+  @Post('coverage')
+  markNotPresent(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() dto: MarkCoverageDto,
+  ) {
+    return this.media.markNotPresent(req.user, id, dto);
+  }
+
+  @Roles(...CAN_SUBMIT_INSPECTION)
+  @Delete('coverage/:category')
+  clearNotPresent(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Param('category') category: string,
+  ) {
+    return this.media.clearNotPresent(req.user, id, category);
   }
 
   @Roles(...CAN_SUBMIT_INSPECTION)

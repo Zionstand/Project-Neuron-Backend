@@ -17,6 +17,7 @@ import {
   MediaMetaDto,
   SignUploadDto,
   ConfirmUploadDto,
+  MarkCoverageDto,
 } from './dto/media.dto';
 import { randomUUID } from 'crypto';
 
@@ -110,7 +111,128 @@ export class MediaService {
       session: period ? { id: period.sessionId } : null,
       rows: rows.map((r) => this.withSignedUrl(r)),
       status: visit?.mediaStatus ?? CaptureStatus.NOT_STARTED,
+      // Folded into the list rather than served from its own endpoint: the
+      // checklist renders on the same screen as the photos, and a field
+      // connection is the wrong place to spend a second round trip.
+      subjects: await this.buildCoverage(schoolId, period?.id ?? null, source, rows),
     };
+  }
+
+  // ─── Shot-list coverage ─────────────────────────────────────────────────────
+  //
+  // The checklist: every active subject, how many photos it has, and whether it
+  // has been marked absent. Counts come from the rows already fetched for the
+  // gallery, so this costs one query for the list and one for the marks.
+  private async buildCoverage(
+    schoolId: string,
+    periodId: string | null,
+    source: CaptureSource,
+    rows: { category: string }[],
+  ) {
+    // Started together, awaited separately: the ternary's empty branch would
+    // otherwise widen the tuple and lose the row type inside Promise.all.
+    const subjectsPromise = this.prisma.mediaCategory.findMany({
+      where: { isActive: true },
+      orderBy: { sortOrder: 'asc' },
+    });
+    const marksPromise = periodId
+      ? this.prisma.mediaCoverage.findMany({
+          where: { schoolId, periodId, source },
+        })
+      : null;
+    const subjects = await subjectsPromise;
+    const marks = marksPromise ? await marksPromise : [];
+
+    const counts = new Map<string, number>();
+    for (const r of rows) counts.set(r.category, (counts.get(r.category) ?? 0) + 1);
+    const markByCode = new Map(marks.map((m) => [m.categoryCode, m] as const));
+
+    return subjects.map((c) => {
+      const mark = markByCode.get(c.code);
+      const count = counts.get(c.code) ?? 0;
+      return {
+        code: c.code,
+        name: c.name,
+        appliesToModule: c.appliesToModule,
+        description: c.description,
+        maxFilesAllowed: c.maxFilesAllowed,
+        sortOrder: c.sortOrder,
+        count,
+        // A photo outranks an absence mark: if someone marked "no fire
+        // extinguisher" and then photographed one, the photo is the truth.
+        notPresent: count === 0 && !!mark,
+        note: count === 0 ? (mark?.note ?? null) : null,
+      };
+    });
+  }
+
+  // Record that a subject genuinely isn't at this school. Refused once photos
+  // exist for it — the two statements contradict each other, and the photo is
+  // the stronger evidence.
+  async markNotPresent(
+    user: RequestUser,
+    schoolId: string,
+    dto: MarkCoverageDto,
+  ) {
+    await this.schools.requireScopedSchool(user, schoolId);
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    const source = sourceForUser(user);
+    const category = await this.resolveCategory(dto.category);
+
+    const existing = await this.prisma.schoolMedia.count({
+      where: {
+        schoolId,
+        periodId: period.id,
+        source,
+        category: category.code,
+        isActive: true,
+      },
+    });
+    if (existing > 0) {
+      throw new BadRequestException(
+        `${category.name} already has ${existing} photo(s), so it can't be marked as not present. Delete them first if they were filed under the wrong subject.`,
+      );
+    }
+
+    await this.prisma.mediaCoverage.upsert({
+      where: {
+        schoolId_periodId_source_categoryCode: {
+          schoolId,
+          periodId: period.id,
+          source,
+          categoryCode: category.code,
+        },
+      },
+      create: {
+        schoolId,
+        sessionId: period.sessionId,
+        periodId: period.id,
+        source,
+        categoryCode: category.code,
+        status: 'NOT_PRESENT',
+        note: dto.note ?? null,
+        markedById: user.id,
+      },
+      update: { note: dto.note ?? null, markedById: user.id },
+    });
+    return this.list(user, schoolId);
+  }
+
+  // Undo the mark — the inspector looked again, or filed it against the wrong
+  // subject.
+  async clearNotPresent(user: RequestUser, schoolId: string, category: string) {
+    await this.schools.requireScopedSchool(user, schoolId);
+    const period = await this.sessions.getCurrentPeriodOrThrow();
+    const source = sourceForUser(user);
+    await this.prisma.mediaCoverage.deleteMany({
+      where: {
+        schoolId,
+        periodId: period.id,
+        source,
+        categoryCode: category,
+      },
+    });
+    return this.list(user, schoolId);
   }
 
   // Assets are private on Cloudinary; the delivery URL is signed on demand and
@@ -122,6 +244,51 @@ export class MediaService {
   ): T {
     const kind = row.mediaType === 'video' ? 'video' : 'image';
     return { ...row, fileUrl: this.cloudinary.signedUrl(row.publicId, kind) };
+  }
+
+  // Resolves a shot-list subject by code, and refuses one that isn't on the
+  // list. The old fixed Module A-D enum tolerated anything and stored it as a
+  // bare string with a null FK; now that the Ministry maintains the list, an
+  // unrecognised code means a stale client or a typo, and silently accepting it
+  // would put photos in a bucket the checklist can never show.
+  private async resolveCategory(code: string) {
+    const row = await this.prisma.mediaCategory.findUnique({
+      where: { code },
+    });
+    if (!row || !row.isActive) {
+      throw new BadRequestException(
+        `"${code}" is not on the photo list for this exercise.`,
+      );
+    }
+    return row;
+  }
+
+  // Per-subject ceiling from the reference table. Checked before the bytes are
+  // accepted, so an inspector isn't told their upload is refused only after
+  // spending the data on it.
+  private async assertRoomInCategory(
+    schoolId: string,
+    periodId: string,
+    source: CaptureSource,
+    category: { code: string; name: string; maxFilesAllowed: number | null },
+    excludeMediaId?: string,
+  ) {
+    if (category.maxFilesAllowed == null) return;
+    const count = await this.prisma.schoolMedia.count({
+      where: {
+        schoolId,
+        periodId,
+        source,
+        category: category.code,
+        isActive: true,
+        ...(excludeMediaId ? { id: { not: excludeMediaId } } : {}),
+      },
+    });
+    if (count >= category.maxFilesAllowed) {
+      throw new BadRequestException(
+        `${category.name} already has ${category.maxFilesAllowed} files, which is the limit for that subject. Delete one before adding another.`,
+      );
+    }
   }
 
   async upload(
@@ -184,9 +351,8 @@ export class MediaService {
       });
     }
 
-    const mediaCategory = await this.prisma.mediaCategory.findUnique({
-      where: { code: dto.category },
-    });
+    const mediaCategory = await this.resolveCategory(dto.category);
+    await this.assertRoomInCategory(schoolId, period.id, source, mediaCategory);
 
     let row;
     try {
@@ -199,7 +365,7 @@ export class MediaService {
           uploadedById: user.id,
           clientId: dto.clientId ?? null,
           category: dto.category,
-          mediaCategoryId: mediaCategory?.id ?? null,
+          mediaCategoryId: mediaCategory.id,
           caption: dto.caption,
           mediaType: isVideo ? 'video' : 'image',
           publicId: result.public_id,
@@ -384,9 +550,8 @@ export class MediaService {
       });
     }
 
-    const mediaCategory = await this.prisma.mediaCategory.findUnique({
-      where: { code: dto.category },
-    });
+    const mediaCategory = await this.resolveCategory(dto.category);
+    await this.assertRoomInCategory(schoolId, period.id, source, mediaCategory);
 
     let row;
     try {
@@ -399,7 +564,7 @@ export class MediaService {
           uploadedById: user.id,
           clientId: dto.clientId ?? null,
           category: dto.category,
-          mediaCategoryId: mediaCategory?.id ?? null,
+          mediaCategoryId: mediaCategory.id,
           caption: dto.caption,
           mediaType: resourceType,
           publicId: dto.publicId,
@@ -459,14 +624,23 @@ export class MediaService {
       });
     }
 
-    const mediaCategory = await this.prisma.mediaCategory.findUnique({
-      where: { code: dto.category },
-    });
+    const mediaCategory = await this.resolveCategory(dto.category);
+    // Only when it's actually moving: re-saving a caption shouldn't fail just
+    // because the subject it already sits in is full.
+    if (dto.category !== existing.category) {
+      await this.assertRoomInCategory(
+        schoolId,
+        period.id,
+        source,
+        mediaCategory,
+        mediaId,
+      );
+    }
     const row = await this.prisma.schoolMedia.update({
       where: { id: mediaId },
       data: {
         category: dto.category,
-        mediaCategoryId: mediaCategory?.id ?? null,
+        mediaCategoryId: mediaCategory.id,
         caption: dto.caption,
         isPrimary: dto.isPrimary === undefined ? existing.isPrimary : makePrimary,
       },

@@ -9,21 +9,16 @@ import {
   Min,
 } from 'class-validator';
 
-// MediaCategory_ID options (Field Capture Guide §1.8 / §6).
-export const MEDIA_CATEGORIES = [
-  'Module A',
-  'Module B',
-  'Module C',
-  'Module D',
-  'General',
-] as const;
-
-const inList = (arr: readonly string[]) => arr as unknown as string[];
+// Categories are no longer a fixed list here. They live in the MediaCategory
+// reference table — one row per shot-list subject, carrying its own shooting
+// instructions and file ceiling — so the Ministry can add or retire a subject
+// without a redeploy. MediaService.resolveCategory is what rejects an unknown
+// code; validating it here would freeze the list back into the build.
 
 // Multipart fields accompanying the uploaded image. `isPrimary` arrives as a
 // string ("true"/"false") from the form and is parsed in the service.
 export class MediaUploadDto {
-  @IsIn(inList(MEDIA_CATEGORIES)) category: string;
+  @IsString() @IsNotEmpty() @MaxLength(60) category: string;
 
   @IsString() @IsNotEmpty() @MaxLength(500) caption: string;
 
@@ -37,7 +32,7 @@ export class MediaUploadDto {
 
 // Editing an existing media row's metadata (no re-upload).
 export class MediaMetaDto {
-  @IsIn(inList(MEDIA_CATEGORIES)) category: string;
+  @IsString() @IsNotEmpty() @MaxLength(60) category: string;
 
   @IsString() @IsNotEmpty() @MaxLength(500) caption: string;
 
@@ -64,7 +59,7 @@ export class ConfirmUploadDto {
 
   @IsIn(['image', 'video']) resourceType: 'image' | 'video';
 
-  @IsIn(inList(MEDIA_CATEGORIES)) category: string;
+  @IsString() @IsNotEmpty() @MaxLength(60) category: string;
 
   @IsString() @IsNotEmpty() @MaxLength(500) caption: string;
 
@@ -73,4 +68,17 @@ export class ConfirmUploadDto {
   @IsOptional() @IsString() @MaxLength(255) originalFileName?: string;
 
   @IsOptional() @IsString() @IsNotEmpty() @MaxLength(64) clientId?: string;
+}
+
+// ─── Shot-list coverage ───────────────────────────────────────────────────────
+
+// Marking a subject absent. There is no "present" counterpart: a photo IS the
+// presence mark, so the only thing that needs recording separately is a subject
+// the school genuinely does not have.
+export class MarkCoverageDto {
+  @IsString() @IsNotEmpty() @MaxLength(60) category: string;
+
+  // Why it isn't there, when that isn't obvious. Optional — forcing a sentence
+  // would just produce "n/a" fifteen times.
+  @IsOptional() @IsString() @MaxLength(500) note?: string;
 }

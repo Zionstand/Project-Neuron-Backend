@@ -34,7 +34,12 @@ export class ReferenceService {
       case 'subjects':
         return { model: this.prisma.subjectArea, orderBy: { name: 'asc' } };
       case 'media-categories':
-        return { model: this.prisma.mediaCategory, orderBy: { code: 'asc' } };
+        // Shot-list order, not alphabetical — the codes are opaque slugs and the
+        // checklist has to read top-to-bottom the way a visit is walked.
+        return {
+          model: this.prisma.mediaCategory,
+          orderBy: { sortOrder: 'asc' },
+        };
       default:
         throw new BadRequestException('Unknown reference type.');
     }
@@ -92,6 +97,7 @@ export class ReferenceService {
           ...(dto.mediaTypeAllowed !== undefined ? { mediaTypeAllowed: dto.mediaTypeAllowed } : {}),
           ...(dto.maxFilesAllowed !== undefined ? { maxFilesAllowed: dto.maxFilesAllowed } : {}),
           ...(dto.description !== undefined ? { description: dto.description } : {}),
+          ...(dto.sortOrder !== undefined ? { sortOrder: dto.sortOrder } : {}),
         };
     }
   }

@@ -31,7 +31,22 @@ function build(overrides: {
       }),
       count: jest.fn(async () => created.length),
     },
-    mediaCategory: { findUnique: jest.fn(async () => ({ id: 'cat-1' })) },
+    // A full reference row: resolveCategory refuses a subject that isn't active,
+    // and assertRoomInCategory reads the ceiling off it.
+    mediaCategory: {
+      findUnique: jest.fn(async () => ({
+        id: 'cat-1',
+        code: 'fire-extinguisher',
+        name: 'Fire extinguisher',
+        maxFilesAllowed: null,
+        isActive: true,
+      })),
+    },
+    mediaCoverage: {
+      findMany: jest.fn(async () => []),
+      upsert: jest.fn(async () => ({})),
+      deleteMany: jest.fn(async () => ({ count: 0 })),
+    },
   };
 
   const sessions = {

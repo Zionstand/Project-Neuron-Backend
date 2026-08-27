@@ -1,7 +1,8 @@
 // Capture-scope gate — a temporary switch for phased rollouts and pilot tests.
 //
-// During the pilot only the Security & Vulnerability section is live; the other
-// capture sections stay reachable in the UI but must not accept data, so a
+// During the pilot only the Security & Vulnerability and Media Capture sections
+// are live; the other capture sections stay reachable in the UI but must not
+// accept data, so a
 // stray URL, a bookmark, or an offline queue draining a pre-pilot draft can't
 // leave half-filled rows in the register tables and pollute the test dataset.
 //
